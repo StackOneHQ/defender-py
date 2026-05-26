@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.3](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.6.2...stackone-defender-v0.6.3) (2026-05-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* When `tier2_fields` is unset, Tier 2 scans all strings (no fallback to Tier 1 risky_field_names).
+
+### Features
+
+* align Python package with @stackone/defender 0.6.3 ([a91a904](https://github.com/StackOneHQ/stackone-defender/commit/a91a904de2a08a29479afb2cff31e8488468ebaf))
+
+
+### Bug Fixes
+
+* **ENG-269:** Python parity with @stackone/defender 0.6.3 ([7c312f1](https://github.com/StackOneHQ/stackone-defender/commit/7c312f1d1c858b2f25b49043d783ce7294638b82))
+
+
+### Miscellaneous Chores
+
+* prepare release 0.6.3 ([8ef9888](https://github.com/StackOneHQ/stackone-defender/commit/8ef9888752713ed5df76c4eed3e117605a8fb9e6))
+* retrigger release workflow after gh actions outage ([72f586b](https://github.com/StackOneHQ/stackone-defender/commit/72f586bcb974b1aab08e7525253d9d8a9c8bc59d))
+
 ## [0.6.2](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.6.1...stackone-defender-v0.6.2) (2026-04-22)
 
 
