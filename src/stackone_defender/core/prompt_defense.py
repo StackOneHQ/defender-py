@@ -245,8 +245,11 @@ class PromptDefense:
         # decision branches (single-head density, multi-head rule fire,
         # multi-head aux veto) live in :meth:`_tier2_finalize`; see
         # :class:`_Tier2Aggregate` for the score variable taxonomy.
+        # The classifier is passed in explicitly so the helpers don't
+        # need to ``assert self._tier2 is not None`` -- those asserts
+        # would be stripped under PYTHONOPTIMIZE.
         tier2 = (
-            self._evaluate_tier2(sfe_filtered_value, depth_flag)
+            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag)
             if self._tier2 is not None
             else _Tier2Outcome()
         )
@@ -319,11 +322,17 @@ class PromptDefense:
 
     def _evaluate_tier2(
         self,
+        tier2: Tier2Classifier,
         sfe_filtered_value: Any,
         depth_flag: dict[str, bool],
     ) -> _Tier2Outcome:
-        """Run the Tier 2 pipeline end to end for one tool result."""
-        assert self._tier2 is not None
+        """Run the Tier 2 pipeline end to end for one tool result.
+
+        ``tier2`` is passed explicitly (rather than read from
+        ``self._tier2``) so the type system can prove non-``None``
+        without runtime asserts; asserts would be stripped under
+        ``PYTHONOPTIMIZE``.
+        """
         out = _Tier2Outcome()
 
         fields_for_tier2 = (
@@ -345,7 +354,7 @@ class PromptDefense:
             )
             return out
 
-        all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(strings)
+        all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
         if not all_chunks:
             out.skip_reason = (
                 "All strings skipped by classifier"
@@ -354,9 +363,9 @@ class PromptDefense:
             )
             return out
 
-        multihead_cfg = self._tier2.get_multihead_config()
+        multihead_cfg = tier2.get_multihead_config()
         all_scores, all_pairs, infer_skip = self._tier2_run_inference(
-            all_chunks, multihead_cfg
+            tier2, all_chunks, multihead_cfg
         )
         if infer_skip is not None:
             out.skip_reason = infer_skip
@@ -368,11 +377,12 @@ class PromptDefense:
         )
         out.raw_score = agg.max_main
         out.max_sentence = agg.max_main_sentence
-        self._tier2_finalize(out, agg, multihead_cfg)
+        self._tier2_finalize(tier2, out, agg, multihead_cfg)
         return out
 
+    @staticmethod
     def _tier2_build_chunks(
-        self,
+        tier2: Tier2Classifier,
         strings: list[str],
     ) -> tuple[list[str], list[tuple[int, int]], set[str]]:
         """Run ``prepare_chunks`` per string and flatten into one chunk list.
@@ -381,11 +391,10 @@ class PromptDefense:
         ``all_chunks`` belonging to ``strings[i]``. A range of ``(-1, -1)``
         marks a string that the classifier skipped (too short, etc.).
         """
-        assert self._tier2 is not None
         all_chunks: list[str] = []
         string_ranges: list[tuple[int, int]] = []
         skip_reasons: set[str] = set()
-        for prep in (self._tier2.prepare_chunks(s) for s in strings):
+        for prep in (tier2.prepare_chunks(s) for s in strings):
             if prep.get("skipped", True):
                 if prep.get("skip_reason"):
                     skip_reasons.add(str(prep["skip_reason"]))
@@ -397,8 +406,9 @@ class PromptDefense:
             string_ranges.append((start_idx, len(all_chunks)))
         return all_chunks, string_ranges, skip_reasons
 
+    @staticmethod
     def _tier2_run_inference(
-        self,
+        tier2: Tier2Classifier,
         all_chunks: list[str],
         multihead_cfg: MultiheadConfig | None,
     ) -> tuple[list[float] | None, list[tuple[float, float | None]] | None, str | None]:
@@ -411,10 +421,9 @@ class PromptDefense:
         back to the single-head decision path instead of silently
         disabling Tier 2 via the aux-veto branch.
         """
-        assert self._tier2 is not None
         try:
             if multihead_cfg is not None:
-                pairs = self._tier2.classify_chunks_batch_pair(all_chunks)
+                pairs = tier2.classify_chunks_batch_pair(all_chunks)
                 if pairs and all(p[1] is None for p in pairs):
                     return (
                         None,
@@ -423,13 +432,49 @@ class PromptDefense:
                         " -- remove `multihead` config or use a dual-head model",
                     )
                 return [p[0] for p in pairs], pairs, None
-            scores = self._tier2.classify_chunks_batch(all_chunks)
+            scores = tier2.classify_chunks_batch(all_chunks)
             return scores, None, None
         except Exception as e:
             return None, None, f"Inference error: {e}"
 
     @staticmethod
+    def _coerce_safe_score(raw: Any) -> float:
+        """Coerce a classifier output to a finite float, treating NaN as 0.0."""
+        if isinstance(raw, (float, int)) and raw == raw:  # NaN != NaN
+            return float(raw)
+        return 0.0
+
+    @staticmethod
+    def _apply_multihead_rule(
+        agg: _Tier2Aggregate,
+        chunk: str,
+        main_score: float,
+        aux_raw: float | None,
+        multihead_cfg: MultiheadConfig | None,
+        all_pairs_present: bool,
+    ) -> None:
+        """Update ``agg`` with this chunk's contribution to the multi-head rule.
+
+        Guard-clause style early returns keep the call site flat. The rule
+        fires when ``main >= main_threshold AND aux < aux_threshold``;
+        when it does, we track the strongest such chunk so the rule-fire
+        branch can surface it.
+        """
+        if multihead_cfg is None or not all_pairs_present or aux_raw is None:
+            return
+        if main_score < multihead_cfg.main_threshold:
+            return
+        if aux_raw >= multihead_cfg.aux_threshold:
+            return
+        agg.rule_any_fired = True
+        if main_score > agg.rule_top_main:
+            agg.rule_top_main = main_score
+            agg.rule_top_aux = aux_raw
+            agg.rule_top_chunk = chunk
+
+    @classmethod
     def _tier2_score_strings(
+        cls,
         all_chunks: list[str],
         all_scores: list[float],
         all_pairs: list[tuple[float, float | None]] | None,
@@ -445,6 +490,7 @@ class PromptDefense:
         multi-head block rule (used by the rule-fire branch for reporting).
         """
         agg = _Tier2Aggregate()
+        pairs_present = all_pairs is not None
         for start_idx, end_idx in string_ranges:
             if start_idx < 0:
                 continue
@@ -452,29 +498,16 @@ class PromptDefense:
             s_max_chunk = ""
             s_max_aux: float | None = None
             for j in range(start_idx, end_idx):
-                raw = all_scores[j]
-                # NaN-safe coercion -- only finite real numbers count.
-                safe_score = (
-                    float(raw) if isinstance(raw, (float, int)) and raw == raw else 0.0
-                )
+                chunk = all_chunks[j]
+                safe_score = cls._coerce_safe_score(all_scores[j])
+                aux_raw = all_pairs[j][1] if all_pairs is not None else None
                 if safe_score > s_max:
                     s_max = safe_score
-                    s_max_chunk = all_chunks[j]
-                    if all_pairs is not None:
-                        s_max_aux = all_pairs[j][1]
-                if multihead_cfg is not None and all_pairs is not None:
-                    aux_raw = all_pairs[j][1]
-                    if aux_raw is None:
-                        continue
-                    if (
-                        safe_score >= multihead_cfg.main_threshold
-                        and aux_raw < multihead_cfg.aux_threshold
-                    ):
-                        agg.rule_any_fired = True
-                        if safe_score > agg.rule_top_main:
-                            agg.rule_top_main = safe_score
-                            agg.rule_top_aux = aux_raw
-                            agg.rule_top_chunk = all_chunks[j]
+                    s_max_chunk = chunk
+                    s_max_aux = aux_raw if pairs_present else None
+                cls._apply_multihead_rule(
+                    agg, chunk, safe_score, aux_raw, multihead_cfg, pairs_present
+                )
             agg.per_string_scores.append(s_max)
             if agg.max_main is None or s_max > agg.max_main:
                 agg.max_main = s_max
@@ -482,8 +515,9 @@ class PromptDefense:
                 agg.aux_of_max_main = s_max_aux
         return agg
 
+    @staticmethod
     def _tier2_finalize(
-        self,
+        tier2: Tier2Classifier,
         out: _Tier2Outcome,
         agg: _Tier2Aggregate,
         multihead_cfg: MultiheadConfig | None,
@@ -503,7 +537,6 @@ class PromptDefense:
           strings); then bucket into a risk level. Density sub-threshold
           rescales with temperature (Bug 2 fix in TS 0.7.0).
         """
-        assert self._tier2 is not None
         if multihead_cfg is not None:
             out.multihead_blocked = agg.rule_any_fired
             if agg.rule_any_fired:
@@ -531,7 +564,7 @@ class PromptDefense:
         # ``T > 1`` the cutoff is ``sigmoid(log(3)/T)``. At T=1 this is
         # 0.75 (no-op); at T=2.41 it is ~0.612.
         out.effective_score = agg.max_main
-        t = self._tier2.get_temperature() or 1.0
+        t = tier2.get_temperature() or 1.0
         density_sub_threshold = (
             0.75 if t == 1.0 else 1.0 / (1.0 + math.exp(-math.log(3.0) / t))
         )
@@ -542,7 +575,7 @@ class PromptDefense:
             if high_count > 0:
                 factor = (high_count / len(agg.per_string_scores)) ** 0.1
                 out.effective_score = agg.max_main * factor
-        out.risk = self._tier2.get_risk_level(out.effective_score)
+        out.risk = tier2.get_risk_level(out.effective_score)
 
     def defend_tool_results(self, items: list[dict[str, Any]]) -> list[DefenseResult]:
         """Defend multiple tool results."""
