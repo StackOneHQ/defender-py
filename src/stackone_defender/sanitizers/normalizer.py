@@ -3,10 +3,12 @@
 NFKC normalization + homoglyph replacement to prevent bypass attacks.
 
 ``normalize_unicode`` is **safe to return to callers** (preserves legitimate
-accents like ``"café"``). The analysis-only helpers ``strip_combining_marks``
-and ``normalize_whitespace`` are used by ``PatternDetector.analyze`` and the
-high-risk branch of ``Sanitizer`` -- never by code paths that surface text
-to consumers.
+accents like ``"café"``). The analysis-grade helpers ``strip_combining_marks``
+and ``normalize_whitespace`` are used by ``PatternDetector.analyze`` and by
+the high-risk branch of ``Sanitizer``. Because Sanitizer Step 1.5 *returns*
+the heavy-normalized string, these helpers can reach consumers, but only at
+``risk_level="high"`` -- where defanging obfuscation outweighs preserving
+the original surface form.
 """
 
 from __future__ import annotations

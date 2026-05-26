@@ -402,13 +402,19 @@ class Tier2Classifier:
         return result.score >= (threshold if threshold is not None else self._medium_risk_threshold)
 
     def get_config(self) -> dict:
+        # ``temperature_t`` reports the **effective** value applied to logits,
+        # not the raw merged input. The merged input may be ``None`` (meaning
+        # "no caller override and no model calibration"), in which case the
+        # underlying ``OnnxClassifier`` defaults to ``1.0``. Surfacing the
+        # effective value keeps debug dumps consistent with what's actually
+        # being computed.
         return {
             "high_risk_threshold": self._high_risk_threshold,
             "medium_risk_threshold": self._medium_risk_threshold,
             "min_text_length": self._min_text_length,
             "max_text_length": self._max_text_length,
             "onnx_model_path": self._model_path,
-            "temperature_t": self._temperature_t,
+            "temperature_t": self.get_temperature(),
             "multihead": self._multihead,
         }
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 
 from ..types import DataBoundary
@@ -21,12 +22,15 @@ def wrap_with_boundary(content: str, boundary: DataBoundary) -> str:
     return f"{boundary.start_tag}{content}{boundary.end_tag}"
 
 
-_BOUNDARY_STRIP_PATTERNS = [
-    r"\[UD-[A-Za-z0-9_-]+\]",
-    r"\[/UD-[A-Za-z0-9_-]+\]",
-    r"<user-data-[A-Za-z0-9_-]+>",
-    r"</user-data-[A-Za-z0-9_-]+>",
-]
+# Combined alternation, compiled once at import. ``re.IGNORECASE`` defends
+# against spoofed markers that use lower- or mixed-case tag names to dodge
+# the strip (defender's own emitters always use the canonical casing, so
+# IGNORECASE is purely a hardening against attacker-controlled input).
+_BOUNDARY_STRIP_RE = re.compile(
+    r"\[/?UD-[A-Za-z0-9_-]+\]|</?user-data-[A-Za-z0-9_-]+>",
+    re.IGNORECASE,
+)
+_BOUNDARY_DETECT_RE = _BOUNDARY_STRIP_RE
 
 
 def strip_boundary_patterns(content: str) -> str:
@@ -36,24 +40,15 @@ def strip_boundary_patterns(content: str) -> str:
     ``<user-data-id>``/``</user-data-id>``. Used before Tier 2 tokenization
     so previously-wrapped content (from nested tool-call chains) or spoofed
     boundary patterns an attacker might inject don't corrupt classifier
-    scores.
+    scores. Matching is case-insensitive to harden against spoofed casings.
     """
-    import re
-
     if not content:
         return content
-    result = content
-    for pattern in _BOUNDARY_STRIP_PATTERNS:
-        result = re.sub(pattern, "", result)
-    return result
+    return _BOUNDARY_STRIP_RE.sub("", content)
 
 
 def contains_boundary_patterns(content: str) -> bool:
-    import re
-    return bool(
-        re.search(r"\[UD-[A-Za-z0-9_-]+\]|\[/UD-[A-Za-z0-9_-]+\]", content)
-        or re.search(r"<user-data-[A-Za-z0-9_-]+>|</user-data-[A-Za-z0-9_-]+>", content)
-    )
+    return bool(_BOUNDARY_DETECT_RE.search(content))
 
 
 def generate_boundary_instructions() -> str:
