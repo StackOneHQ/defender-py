@@ -48,23 +48,28 @@ class ToolResultSanitizer:
         use_tier1_classification: bool = True,
         block_high_risk: bool = False,
         cumulative_risk_thresholds: dict[str, int | float] | None = None,
+        annotate_boundary: bool = False,
     ):
         self._risky_fields = risky_fields or DEFAULT_RISKY_FIELDS
         self._traversal = traversal or DEFAULT_TRAVERSAL_CONFIG
         self._default_risk_level = default_risk_level
         self._use_tier1 = use_tier1_classification
         self._block_high_risk = block_high_risk
+        self._annotate_boundary = annotate_boundary
         merged = dict(DEFAULT_CUMULATIVE_RISK_THRESHOLDS)
         if cumulative_risk_thresholds:
             merged.update(cumulative_risk_thresholds)
         self._cumulative_thresholds = merged
 
-        self._sanitizer: Sanitizer = create_sanitizer()
+        self._sanitizer: Sanitizer = create_sanitizer(annotate_boundary=annotate_boundary)
         self._pattern_detector: PatternDetector = create_pattern_detector()
 
     def sanitize(self, value: Any, *, tool_name: str, vertical: str | None = None, resource: str | None = None, risk_level: RiskLevel | None = None, boundary: DataBoundary | None = None) -> SanitizationResult:
         start_time = time.perf_counter()
-        boundary = boundary or generate_data_boundary()
+        if self._annotate_boundary:
+            boundary = boundary or generate_data_boundary()
+        else:
+            boundary = None
         cumulative_risk = self._create_cumulative_tracker()
         size_metrics = create_size_metrics()
 

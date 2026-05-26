@@ -17,23 +17,28 @@ class Sanitizer:
     """Composite Sanitizer.
 
     Applies sanitization methods based on risk level:
-    - Low: Unicode normalization + boundary annotation
+    - Low: Unicode normalization; boundary wrapping only if ``annotate_boundary``
     - Medium: + Role stripping + pattern removal
     - High: + Encoding detection and redaction
     - Critical: Block (returns empty or error indicator)
+
+    Boundary ``[UD-*]`` wrapping is off by default. Pass ``annotate_boundary=True``
+    or use explicit ``methods`` including ``boundary_annotation`` (escape hatch).
     """
 
     def __init__(
         self,
         *,
         always_normalize: bool = True,
-        always_annotate: bool = True,
+        annotate_boundary: bool = False,
+        default_boundary: DataBoundary | None = None,
         redaction_text: str = "[REDACTED]",
         encoding_redaction_text: str = "[ENCODED DATA]",
         include_original: bool = False,
     ):
         self._always_normalize = always_normalize
-        self._always_annotate = always_annotate
+        self._annotate_boundary = annotate_boundary
+        self._default_boundary = default_boundary
         self._redaction_text = redaction_text
         self._encoding_redaction_text = encoding_redaction_text
         self._include_original = include_original
@@ -100,9 +105,9 @@ class Sanitizer:
                 result = redact_all_encoding(result, self._encoding_redaction_text)
                 methods_applied.append("encoding_detection")
 
-        # Step 5: Boundary annotation
-        if self._always_annotate or risk_level != "low":
-            b = boundary or generate_data_boundary()
+        # Step 5: Boundary annotation (opt-in; off by default)
+        if self._annotate_boundary:
+            b = boundary or self._default_boundary or generate_data_boundary()
             result = wrap_with_boundary(result, b)
             methods_applied.append("boundary_annotation")
 
@@ -137,7 +142,8 @@ class Sanitizer:
                 result = redact_all_encoding(result, self._encoding_redaction_text)
                 methods_applied.append(method)
             elif method == "boundary_annotation":
-                b = boundary or generate_data_boundary()
+                # Explicit method list — honored even when annotate_boundary is False.
+                b = boundary or self._default_boundary or generate_data_boundary()
                 result = wrap_with_boundary(result, b)
                 methods_applied.append(method)
 

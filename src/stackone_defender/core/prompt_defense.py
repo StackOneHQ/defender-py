@@ -94,6 +94,7 @@ class PromptDefense:
         use_sfe: bool | dict[str, Any] = False,
         block_high_risk: bool = False,
         default_risk_level: RiskLevel = "medium",
+        annotate_boundary: bool = False,
     ):
         self._config: PromptDefenseConfig = create_config(config)
         if block_high_risk:
@@ -119,6 +120,7 @@ class PromptDefense:
             use_tier1_classification=enable_tier1,
             block_high_risk=block_high_risk,
             cumulative_risk_thresholds=self._config.cumulative_risk_thresholds,
+            annotate_boundary=annotate_boundary,
         )
 
         self._pattern_detector: PatternDetector = create_pattern_detector()
@@ -142,18 +144,23 @@ class PromptDefense:
         return self._tier2.is_ready() if self._tier2 else False
 
     def defend_tool_result(self, value: Any, tool_name: str) -> DefenseResult:
-        """Defend a tool result using Tier 1 and optionally Tier 2 classification."""
+        """Defend a tool result using Tier 1 and optionally Tier 2 classification.
+
+        When SFE is enabled, ``fields_dropped`` lists paths excluded from **Tier 2**
+        string extraction only; the returned ``sanitized`` payload is still Tier 1 output
+        from the **original** tool value (SFE does not remove fields from the returned object).
+        """
         start_time = time.perf_counter()
         depth_flag = {"hit": False}
 
-        effective_value: Any = value
+        sfe_filtered_value: Any = value
         fields_dropped: list[str] = []
         if self._sfe_enabled:
             try:
                 predictor = self._sfe_custom_predictor or get_default_predictor()
                 if predictor is not None:
                     pre = sfe_preprocess(value, {"predictor": predictor, "threshold": self._sfe_threshold})
-                    effective_value = pre.filtered
+                    sfe_filtered_value = pre.filtered
                     fields_dropped = pre.dropped
                     if pre.truncated_at_depth:
                         depth_flag["hit"] = True
@@ -163,8 +170,8 @@ class PromptDefense:
                     e,
                 )
 
-        # Tier 1: pattern-based sanitization
-        sanitized = self._tool_sanitizer.sanitize(effective_value, tool_name=tool_name)
+        # Tier 1: pattern-based sanitization on the original payload (matches TS 0.6.3).
+        sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name)
 
         # Collect Tier 1 metadata
         prm = sanitized.metadata.patterns_removed_by_field
@@ -177,7 +184,7 @@ class PromptDefense:
             if any(m in active_methods for m in methods)
         ]
 
-        # Tier 2: ML classification on raw value
+        # Tier 2: ML classification on strings from the SFE-filtered view (or full value if SFE off).
         tier2_score: float | None = None
         tier2_effective_score: float | None = None
         max_sentence: str | None = None
@@ -185,21 +192,16 @@ class PromptDefense:
         tier2_skip_reason: str | None = None
 
         if self._tier2:
-            fields_for_tier2 = self._tier2_fields if self._tier2_fields is not None else self._config.tier2.tier2_fields
-            extraction_fields_for_tier2 = fields_for_tier2
-            if extraction_fields_for_tier2 is None:
-                risky_names = sanitized.metadata.risky_field_names
-                if risky_names:
-                    extraction_fields_for_tier2 = risky_names
+            fields_for_tier2 = (
+                self._tier2_fields if self._tier2_fields is not None else self._config.tier2.tier2_fields
+            )
             strings = [
                 s
-                for s in _extract_strings(effective_value, extraction_fields_for_tier2, depth_flag)
+                for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
                 if len(s) > 0
             ]
             if not strings:
-                scoped = (fields_for_tier2 is not None and len(fields_for_tier2) > 0) or (
-                    extraction_fields_for_tier2 is not None and len(extraction_fields_for_tier2) > 0
-                )
+                scoped = fields_for_tier2 is not None and len(fields_for_tier2) > 0
                 if scoped:
                     tier2_skip_reason = "No strings found in tier2_fields"
                 else:

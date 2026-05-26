@@ -129,7 +129,7 @@ class SanitizationMetadata:
     cumulative_risk_escalated: bool = False
     total_latency_ms: float = 0.0
     size_metrics: SizeMetrics = field(default_factory=SizeMetrics)
-    # Leaf dict keys Tier 1 identified as risky string fields (for Tier 2 scoping).
+    # Leaf dict keys Tier 1 identified as risky string fields (telemetry / diagnostics).
     risky_field_names: list[str] = field(default_factory=list)
     # Paths of keys removed due to prototype-pollution risk.
     dangerous_keys_removed: list[str] = field(default_factory=list)
@@ -173,8 +173,9 @@ class Tier2Config:
     min_text_length: int = 10
     max_text_length: int = 10000
     onnx_model_path: str | None = None
-    # None: Tier 2 uses Tier 1 risky_field_names when non-empty, else all strings.
-    # Non-empty list: only strings under those keys. Empty list: all strings (same as TS).
+    # Tier 2 extraction scope (SFE-filtered payload when SFE is on).
+    # ``None`` or empty list: all strings (matches TypeScript when ``tier2Fields`` is unset).
+    # Non-empty list: only strings under those dict keys (full-depth collect).
     tier2_fields: list[str] | None = None
 
 
@@ -197,6 +198,12 @@ class PromptDefenseConfig:
 
 @dataclass
 class DefenseResult:
+    """Outcome of ``defend_tool_result`` (Tier 1 sanitize + optional Tier 2 + SFE metadata).
+
+    ``fields_dropped`` (when SFE is enabled) lists field paths removed from the **Tier 2**
+    classifier input only; they are **not** stripped from ``sanitized``.
+    """
+
     allowed: bool
     risk_level: RiskLevel
     sanitized: Any

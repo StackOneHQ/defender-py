@@ -94,7 +94,7 @@ else:
 - **Role stripping** — `SYSTEM:`, `ASSISTANT:`, `<system>`, `[INST]`, etc.
 - **Pattern removal** — phrases like “ignore previous instructions”
 - **Encoding detection** — suspicious Base64/URL-shaped payloads
-- **Boundary annotation** — `[UD-{id}]…[/UD-{id}]` wrappers around untrusted spans
+- **Boundary annotation (opt-in)** — `[UD-{id}]…[/UD-{id}]` wrappers when `annotate_boundary=True` (npm: `annotateBoundary`). Use `generate_boundary_instructions` from the package root in prompts when you enable wrapping.
 
 ### Tier 2 — ML classification (ONNX)
 
@@ -106,8 +106,9 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 
 ### Optional SFE preprocessor
 
-- `use_sfe=True` enables a field-level FastText pass before Tier 1/Tier 2
-- Drops metadata-like leaves (IDs, enum-like strings) and keeps user-facing content
+- `use_sfe=True` runs a field-level FastText pass to build a **classifier-only** view of the payload
+- **Tier 1** always sanitizes the **original** tool value; **`sanitized`** in `DefenseResult` is unchanged by SFE drops
+- **Tier 2** extracts strings from the SFE-filtered tree; `fields_dropped` lists paths omitted from that extraction (not removed from `sanitized`)
 - Fails open if the runtime/model is unavailable: payload continues unfiltered
 
 **Benchmarks** (F1 @ threshold 0.5):
@@ -140,7 +141,8 @@ defense = create_prompt_defense(
     enable_tier2=True,
     block_high_risk=False,
     default_risk_level="medium",
-    tier2_fields=["subject", "body", "snippet"],  # optional: scope Tier 2 to these JSON keys
+    annotate_boundary=False,  # True: wrap risky strings with [UD-…] tags (npm: annotateBoundary)
+    tier2_fields=["subject", "body", "snippet"],  # optional: scope Tier 2 to these JSON keys (default: all strings)
     use_sfe=True,  # optional: enable semantic field extractor preprocessing
     config={
         "tier2": {
@@ -153,7 +155,7 @@ defense = create_prompt_defense(
 
 ### `defense.defend_tool_result(value, tool_name)`
 
-Runs Tier 1 sanitization on risky fields, then Tier 2 on extracted text (with optional field scoping). **Synchronous** — no `await`.
+Runs Tier 1 sanitization on risky fields of the **original** payload, then Tier 2 on strings from the SFE-filtered view when SFE is on (otherwise the full value). Optional `tier2_fields` restricts Tier 2 extraction to specific keys; omit it to classify **all** strings (matches `@stackone/defender` 0.6.3). **Synchronous** — no `await`.
 
 ```python
 from dataclasses import dataclass, field

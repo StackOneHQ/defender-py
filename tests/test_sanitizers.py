@@ -190,9 +190,24 @@ class TestSanitizer:
     def setup_method(self):
         self.sanitizer = Sanitizer()
 
-    def test_low_risk_normalizes_and_annotates(self):
+    def test_low_risk_normalizes_without_boundary_by_default(self):
         result = self.sanitizer.sanitize("Hello world", risk_level="low")
         assert "unicode_normalization" in result.methods_applied
+        assert "boundary_annotation" not in result.methods_applied
+        assert "[UD-" not in result.sanitized
+
+    def test_low_risk_wraps_when_annotate_boundary_true(self):
+        s = Sanitizer(annotate_boundary=True)
+        result = s.sanitize("Hello world", risk_level="low")
+        assert "boundary_annotation" in result.methods_applied
+        assert "[UD-" in result.sanitized
+
+    def test_explicit_boundary_method_wraps_when_annotate_off(self):
+        result = self.sanitizer.sanitize(
+            "Hello world",
+            risk_level="low",
+            methods=["unicode_normalization", "boundary_annotation"],
+        )
         assert "boundary_annotation" in result.methods_applied
         assert "[UD-" in result.sanitized
 
@@ -227,7 +242,7 @@ class TestSanitizer:
     def test_sanitize_light(self):
         result = self.sanitizer.sanitize_light("Hello world")
         assert result.risk_level == "low"
-        assert "boundary_annotation" in result.methods_applied
+        assert "boundary_annotation" not in result.methods_applied
 
     def test_sanitize_aggressive(self):
         result = self.sanitizer.sanitize_aggressive("SYSTEM: test")
@@ -236,9 +251,14 @@ class TestSanitizer:
 
 
 class TestSanitizeText:
-    def test_quick_sanitize(self):
+    def test_quick_sanitize_no_boundary_by_default(self):
         result = sanitize_text("Hello world")
-        assert "[UD-" in result  # Should have boundary
+        assert "[UD-" not in result
+
+    def test_quick_sanitize_with_annotate_boundary(self):
+        s = Sanitizer(annotate_boundary=True)
+        result = s.sanitize("Hello world", risk_level="medium").sanitized
+        assert "[UD-" in result
 
 
 class TestSuggestRiskLevel:

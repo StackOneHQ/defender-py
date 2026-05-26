@@ -36,8 +36,9 @@ def test_sfe_preprocess_fail_open_when_predictor_unavailable(monkeypatch):
     assert result.dropped == []
 
 
-def test_prompt_defense_use_sfe_reports_fields_dropped():
+def test_prompt_defense_use_sfe_reports_fields_dropped_but_keeps_tier1_payload():
     defense = create_prompt_defense(enable_tier1=False, enable_tier2=False, use_sfe={"predictor": _MockPredictor()})
     result = defense.defend_tool_result({"uuid": "abc-123", "description": "Hello"}, "test_tool")
     assert "uuid" in result.fields_dropped
-    assert "uuid" not in result.sanitized
+    assert result.sanitized["uuid"] == "abc-123"
+    assert result.sanitized["description"] == "Hello"
