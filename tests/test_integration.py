@@ -313,6 +313,178 @@ class TestPromptDefenseTier2SkipReason:
         assert result.tier2_score is None
 
 
+# ---------------------------------------------------------------------------
+# 0.7.0 parity: PromptDefense multi-head + temperature-aware density
+# ---------------------------------------------------------------------------
+
+
+@patch("stackone_defender.core.prompt_defense.create_tier2_classifier")
+class TestPromptDefenseMultihead:
+    """Multi-head rule-fire, aux-veto, and misconfig-guard branches."""
+
+    @staticmethod
+    def _make_mock(*, multihead_cfg, pairs, temperature=1.0):
+        from stackone_defender.types import MultiheadConfig as _MHC
+
+        mock_t2 = MagicMock()
+        mock_t2.get_risk_level.return_value = "low"
+        mock_t2.get_config.return_value = {
+            "high_risk_threshold": 0.8,
+            "medium_risk_threshold": 0.5,
+            "min_text_length": 10,
+            "max_text_length": 10000,
+            "temperature_t": temperature,
+        }
+        mock_t2.get_temperature.return_value = temperature
+        mh = _MHC(**multihead_cfg) if multihead_cfg else None
+        mock_t2.get_multihead_config.return_value = mh
+        mock_t2.prepare_chunks.side_effect = lambda s: {"chunks": [s], "skipped": False}
+        mock_t2.classify_chunks_batch_pair.side_effect = lambda chunks: pairs[: len(chunks)]
+        mock_t2.classify_chunks_batch.side_effect = lambda chunks: [
+            p[0] for p in pairs[: len(chunks)]
+        ]
+        return mock_t2
+
+    def test_multihead_rule_fires_block_path(self, mock_create):
+        # main high, aux low -> rule fires -> tier2_multihead_blocked = True.
+        mock_create.return_value = self._make_mock(
+            multihead_cfg={"main_threshold": 0.5, "aux_threshold": 0.5},
+            pairs=[(0.9, 0.1)],
+        )
+        defense = create_prompt_defense(enable_tier2=True, block_high_risk=True)
+        result = defense.defend_tool_result(
+            {"body": "some long enough body text to chunk and classify"}, "t",
+        )
+        assert result.tier2_multihead_blocked is True
+        assert result.tier2_score == pytest.approx(0.9)
+        assert result.tier2_aux_score == pytest.approx(0.1)
+        assert result.tier2_raw_score == pytest.approx(0.9)
+        assert result.risk_level == "high"
+        assert result.allowed is False
+
+    def test_multihead_aux_veto_rescues_high_main(self, mock_create):
+        # main high but aux >= aux_threshold -> rule does NOT fire ->
+        # tier2_effective_score (surfaced as tier2_score) is 0.
+        # tier2_raw_score still reports the high main for forensics.
+        mock_create.return_value = self._make_mock(
+            multihead_cfg={"main_threshold": 0.5, "aux_threshold": 0.5},
+            pairs=[(0.95, 0.9)],
+        )
+        defense = create_prompt_defense(enable_tier2=True, block_high_risk=True)
+        result = defense.defend_tool_result(
+            {"body": "some long enough body text to classify"}, "t",
+        )
+        assert result.tier2_multihead_blocked is False
+        assert result.tier2_score == pytest.approx(0.0)
+        assert result.tier2_raw_score == pytest.approx(0.95)
+        assert result.tier2_aux_score == pytest.approx(0.9)
+        # Aux veto means Tier 2 contributes nothing to risk.
+        assert result.risk_level != "high"
+        assert result.allowed is True
+
+    def test_multihead_misconfig_guard(self, mock_create):
+        # multihead configured but model emits aux=None for every chunk.
+        mock_create.return_value = self._make_mock(
+            multihead_cfg={"main_threshold": 0.5, "aux_threshold": 0.5},
+            pairs=[(0.7, None)],
+        )
+        defense = create_prompt_defense(enable_tier2=True)
+        result = defense.defend_tool_result(
+            {"body": "some long enough body text"}, "t",
+        )
+        assert result.tier2_skip_reason is not None
+        assert "multihead configured" in result.tier2_skip_reason
+        # Tier 2 was effectively disabled -> no score surfaced.
+        assert result.tier2_score is None
+        assert result.tier2_multihead_blocked is None
+
+
+@patch("stackone_defender.core.prompt_defense.create_tier2_classifier")
+class TestPromptDefenseDensityTemperature:
+    """Bug 2: density sub-threshold rescales under temperature_t."""
+
+    @staticmethod
+    def _make_mock(*, temperature, scores):
+        mock_t2 = MagicMock()
+        mock_t2.get_risk_level.side_effect = lambda s: (
+            "high" if s >= 0.64 else "medium" if s >= 0.5 else "low"
+        )
+        mock_t2.get_config.return_value = {
+            "high_risk_threshold": 0.64,
+            "medium_risk_threshold": 0.5,
+            "min_text_length": 10,
+            "max_text_length": 10000,
+            "temperature_t": temperature,
+        }
+        mock_t2.get_temperature.return_value = temperature
+        mock_t2.get_multihead_config.return_value = None
+        mock_t2.prepare_chunks.side_effect = lambda s: {"chunks": [s], "skipped": False}
+        mock_t2.classify_chunks_batch.side_effect = lambda chunks: scores[: len(chunks)]
+        return mock_t2
+
+    def test_density_no_damping_under_three_strings(self, mock_create):
+        mock_create.return_value = self._make_mock(temperature=1.0, scores=[0.9, 0.9])
+        defense = create_prompt_defense(enable_tier2=True)
+        result = defense.defend_tool_result({"a": "aaaaaaaaaaa", "b": "bbbbbbbbbbb"}, "t")
+        # 2 strings -> no density damping.
+        assert result.tier2_score == pytest.approx(0.9)
+        assert result.tier2_raw_score == pytest.approx(0.9)
+
+    def test_density_damping_at_t1(self, mock_create):
+        # 4 strings, scores [0.9, 0.9, 0.1, 0.1]. At T=1 the high cutoff is 0.75,
+        # so high_count=2, total=4, factor=(2/4)^0.1 ~ 0.933. Effective ~ 0.84.
+        mock_create.return_value = self._make_mock(
+            temperature=1.0, scores=[0.9, 0.9, 0.1, 0.1]
+        )
+        defense = create_prompt_defense(enable_tier2=True)
+        result = defense.defend_tool_result(
+            {"a": "aaaaaaaaaa", "b": "bbbbbbbbbb", "c": "cccccccccc", "d": "dddddddddd"},
+            "t",
+        )
+        expected_factor = (2 / 4) ** 0.1
+        assert result.tier2_raw_score == pytest.approx(0.9)
+        assert result.tier2_score == pytest.approx(0.9 * expected_factor, rel=1e-3)
+
+    def test_density_damping_rescales_at_t241(self, mock_create):
+        # At T=2.41, density_sub_threshold = sigmoid(log(3)/2.41) ~ 0.612.
+        # Scores 0.65 and 0.55: at T=1 only 0.65 counts; at T=2.41 only 0.65
+        # still counts (0.55 < 0.612). Verify the rescaling formula directly:
+        # provide three scores [0.65, 0.55, 0.55] so 1/3 are high under T=2.41.
+        mock_create.return_value = self._make_mock(
+            temperature=2.41, scores=[0.65, 0.55, 0.55]
+        )
+        defense = create_prompt_defense(enable_tier2=True)
+        result = defense.defend_tool_result(
+            {"a": "aaaaaaaaaa", "b": "bbbbbbbbbb", "c": "cccccccccc"}, "t"
+        )
+        expected_factor = (1 / 3) ** 0.1
+        assert result.tier2_raw_score == pytest.approx(0.65)
+        assert result.tier2_score == pytest.approx(0.65 * expected_factor, rel=1e-3)
+
+
+@patch("stackone_defender.core.prompt_defense.create_tier2_classifier")
+class TestPromptDefenseThresholdReadback:
+    """Bug 1: block gate must use calibrated thresholds from the classifier."""
+
+    def test_high_risk_threshold_synced_from_classifier(self, mock_create):
+        mock_t2 = MagicMock()
+        mock_t2.get_config.return_value = {
+            "high_risk_threshold": 0.42,
+            "medium_risk_threshold": 0.21,
+            "min_text_length": 10,
+            "max_text_length": 10000,
+            "temperature_t": 1.0,
+        }
+        mock_t2.get_multihead_config.return_value = None
+        mock_create.return_value = mock_t2
+
+        defense = create_prompt_defense(enable_tier2=True)
+        cfg = defense.get_config()
+        # The block gate's local copy was read back from the classifier.
+        assert cfg.tier2.high_risk_threshold == 0.42
+        assert cfg.tier2.medium_risk_threshold == 0.21
+
+
 class TestRealWorldScenarios:
     def setup_method(self):
         self.defense = create_prompt_defense()

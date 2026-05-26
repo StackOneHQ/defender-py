@@ -104,6 +104,8 @@ def create_config(overrides: dict | None = None) -> PromptDefenseConfig:
                 max_text_length=DEFAULT_TIER2_CONFIG.max_text_length,
                 onnx_model_path=DEFAULT_TIER2_CONFIG.onnx_model_path,
                 tier2_fields=DEFAULT_TIER2_CONFIG.tier2_fields,
+                multihead=DEFAULT_TIER2_CONFIG.multihead,
+                temperature_t=DEFAULT_TIER2_CONFIG.temperature_t,
             ),
             block_high_risk=False,
         )

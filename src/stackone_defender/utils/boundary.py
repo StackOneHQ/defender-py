@@ -21,6 +21,33 @@ def wrap_with_boundary(content: str, boundary: DataBoundary) -> str:
     return f"{boundary.start_tag}{content}{boundary.end_tag}"
 
 
+_BOUNDARY_STRIP_PATTERNS = [
+    r"\[UD-[A-Za-z0-9_-]+\]",
+    r"\[/UD-[A-Za-z0-9_-]+\]",
+    r"<user-data-[A-Za-z0-9_-]+>",
+    r"</user-data-[A-Za-z0-9_-]+>",
+]
+
+
+def strip_boundary_patterns(content: str) -> str:
+    """Remove defender's boundary markers from text.
+
+    Both formats are stripped: ``[UD-id]``/``[/UD-id]`` and
+    ``<user-data-id>``/``</user-data-id>``. Used before Tier 2 tokenization
+    so previously-wrapped content (from nested tool-call chains) or spoofed
+    boundary patterns an attacker might inject don't corrupt classifier
+    scores.
+    """
+    import re
+
+    if not content:
+        return content
+    result = content
+    for pattern in _BOUNDARY_STRIP_PATTERNS:
+        result = re.sub(pattern, "", result)
+    return result
+
+
 def contains_boundary_patterns(content: str) -> bool:
     import re
     return bool(

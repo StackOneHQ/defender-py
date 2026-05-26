@@ -9,7 +9,10 @@ from __future__ import annotations
 import math
 import re
 import time
+import unicodedata
 
+from ..sanitizers.leet_normalizer import normalize_leet_speak
+from ..sanitizers.normalizer import normalize_unicode, normalize_whitespace, strip_combining_marks
 from ..types import PatternDefinition, PatternMatch, RiskLevel, StructuralFlag, Tier1Result
 from .patterns import ALL_PATTERNS, contains_filter_keywords
 
@@ -47,16 +50,83 @@ class PatternDetector:
             return self._empty_result(start)
 
         original_length = len(text)
-        analysis_text = text[: self._max_analysis_length] if len(text) > self._max_analysis_length else text
+        raw_text = text[: self._max_analysis_length] if len(text) > self._max_analysis_length else text
 
+        # Normalisation chain: collapse obfuscation before injection pattern
+        # matching. Order matters:
+        # 1. NFD-decompose: precomposed accents become base + combining mark.
+        # 2. strip_combining_marks: Zalgo defense + accent stripping.
+        # 3. normalize_unicode: homoglyphs/fullwidth -> ASCII.
+        # 4. normalize_whitespace: collapse spaced letters + embedded newlines.
+        # 5. normalize_leet_speak: 1gn0r3 -> ignore.
+        # NFD-decomposition lives here (not in normalize_unicode) because it
+        # strips legitimate accents like ``café`` -> ``cafe`` -- fine for
+        # analysis but would be data loss if returned to callers. The result
+        # is analysis-only and never returned.
+        analysis_text = normalize_leet_speak(
+            normalize_whitespace(
+                normalize_unicode(strip_combining_marks(unicodedata.normalize("NFD", raw_text)))
+            )
+        )
+
+        # Fast filter: short-circuit if neither raw nor normalised text
+        # contains keywords. Raw text is checked to preserve detection of
+        # obfuscation patterns (e.g. invisible unicode, leet-speak variants)
+        # that are normalised away before injection patterns run. Disable the
+        # fast filter when custom patterns are provided -- callers may add
+        # patterns whose keywords aren't in the static list.
         should_use_fast_filter = self._use_fast_filter and not self._has_custom
-        if should_use_fast_filter and not contains_filter_keywords(analysis_text):
-            flags = self._detect_structural_issues(analysis_text, original_length)
+        raw_has_keywords = not should_use_fast_filter or contains_filter_keywords(raw_text)
+        norm_has_keywords = not should_use_fast_filter or contains_filter_keywords(analysis_text)
+
+        if not raw_has_keywords and not norm_has_keywords:
+            flags = self._detect_structural_issues(raw_text, original_length)
             return self._create_result([], flags, start)
 
-        matches = self._detect_patterns(analysis_text)
-        flags = self._detect_structural_issues(analysis_text, original_length)
-        return self._create_result(matches, flags, start)
+        # Short-circuit: if normalisation produced no change, a single pass
+        # is sufficient and avoids doubling pattern work for plain-text input.
+        if raw_text == analysis_text:
+            matches = self._detect_patterns(raw_text) if raw_has_keywords else []
+            flags = self._detect_structural_issues(raw_text, original_length)
+            return self._create_result(matches, flags, start)
+
+        # Run patterns on raw text -- catches obfuscation-specific patterns
+        # (e.g. invisible_unicode, leetspeak_injection) that normalisation
+        # removes. Run whenever EITHER pass has keywords: if only the
+        # normalised text has keywords (pure leet-speak with no other
+        # fast-filter hits), we still want the raw pass to fire obfuscation
+        # patterns like leetspeak_injection.
+        raw_matches = (
+            self._detect_patterns(raw_text) if (raw_has_keywords or norm_has_keywords) else []
+        )
+
+        # Run patterns on normalised text -- catches injection patterns
+        # hidden behind leet-speak, whitespace, or homoglyph obfuscation.
+        # Matches are tagged ``normalised=True`` because their
+        # position/matched values reference the transformed text.
+        norm_matches_raw = self._detect_patterns(analysis_text) if norm_has_keywords else []
+        norm_matches = [
+            PatternMatch(
+                pattern=m.pattern,
+                matched=m.matched,
+                position=m.position,
+                category=m.category,
+                severity=m.severity,
+                normalised=True,
+            )
+            for m in norm_matches_raw
+        ]
+
+        # Merge: normalised matches take priority. Raw-only matches are
+        # appended for patterns that fired on the original text but not the
+        # normalised form (e.g. obfuscation-detection patterns that match the
+        # raw encoding characters).
+        seen_patterns = {m.pattern for m in norm_matches}
+        merged_matches: list[PatternMatch] = [*norm_matches]
+        merged_matches.extend(m for m in raw_matches if m.pattern not in seen_patterns)
+
+        flags = self._detect_structural_issues(raw_text, original_length)
+        return self._create_result(merged_matches, flags, start)
 
     # ------------------------------------------------------------------
     # Pattern detection
@@ -65,7 +135,6 @@ class PatternDetector:
     def _detect_patterns(self, text: str) -> list[PatternMatch]:
         matches: list[PatternMatch] = []
         for defn in self._patterns:
-            # Use finditer for all patterns (handles global-like behavior)
             for m in defn.pattern.finditer(text):
                 matches.append(
                     PatternMatch(

@@ -5,10 +5,22 @@ Risk-based sanitization that combines multiple methods based on risk level.
 
 from __future__ import annotations
 
+import unicodedata
+
 from ..types import DataBoundary, FieldSanitizationResult, RiskLevel, SanitizationMethod
 from ..utils.boundary import generate_data_boundary, wrap_with_boundary
-from .encoding_detector import contains_suspicious_encoding, redact_all_encoding
-from .normalizer import contains_suspicious_unicode, normalize_unicode
+from .encoding_detector import (
+    contains_suspicious_encoding,
+    contains_suspicious_encoding_deep,
+    redact_all_encoding,
+)
+from .leet_normalizer import normalize_leet_speak
+from .normalizer import (
+    contains_suspicious_unicode,
+    normalize_unicode,
+    normalize_whitespace,
+    strip_combining_marks,
+)
 from .pattern_remover import remove_patterns
 from .role_stripper import contains_role_markers, strip_role_markers
 
@@ -76,10 +88,27 @@ class Sanitizer:
         methods_applied: list[SanitizationMethod] = []
         patterns_removed: list[str] = []
 
-        # Step 1: Unicode normalization
+        # Step 1: Unicode normalization. NFKC + homoglyphs only -- combining
+        # marks are NOT stripped here so benign accented text like ``café``
+        # survives Sanitizer's returned output.
         if self._always_normalize or risk_level != "low":
             result = normalize_unicode(result)
             methods_applied.append("unicode_normalization")
+
+        # Step 1.5: Heavy normalization at HIGH risk only. Tier 1 has high
+        # confidence of an attack at this point; apply analysis-grade
+        # normalisation (combining-mark strip, whitespace collapse, leet-speak
+        # decode) BEFORE role stripping and pattern removal so the obfuscated
+        # forms that ``PatternDetector`` detected are also redacted by the
+        # sanitizer. Without this, detection succeeds but the dangerous
+        # content survives in the output. We skip this at medium risk because
+        # it would strip accents from benign borderline content (default risk
+        # level is ``medium`` for all fields). No method label is pushed --
+        # this is an internal pre-step.
+        if risk_level == "high":
+            result = normalize_leet_speak(
+                normalize_whitespace(strip_combining_marks(unicodedata.normalize("NFD", result)))
+            )
 
         # Step 2: Role stripping (medium+)
         if risk_level in ("medium", "high"):
@@ -99,9 +128,12 @@ class Sanitizer:
                 patterns_removed.extend(pr.patterns_removed)
                 methods_applied.append("pattern_removal")
 
-        # Step 4: Encoding detection (high only)
+        # Step 4: Encoding detection (high only). Uses deep multi-level check
+        # to catch chained encodings (e.g. base64 of hex). Risk escalation
+        # for encoded payloads (ROT13, binary, Morse) is handled upstream in
+        # ``ToolResultSanitizer._sanitize_string_field``.
         if risk_level == "high":
-            if contains_suspicious_encoding(result):
+            if contains_suspicious_encoding_deep(result):
                 result = redact_all_encoding(result, self._encoding_redaction_text)
                 methods_applied.append("encoding_detection")
 
