@@ -38,6 +38,10 @@ class PatternMatch:
     position: int
     category: PatternCategory
     severity: Literal["low", "medium", "high"]
+    # When True, ``position`` and ``matched`` reference the post-normalisation
+    # form of the input (e.g. NFD + leet decode), not the original text. Set by
+    # ``PatternDetector.analyze`` on the normalised pass; absent on raw matches.
+    normalised: bool = False
 
 
 @dataclass
@@ -63,6 +67,21 @@ class Tier2Result:
     skipped: bool
     skip_reason: str | None = None
     latency_ms: float = 0.0
+    # Aux-head sigmoid for dual-head ONNX models; ``None`` for single-head.
+    aux: float | None = None
+
+
+@dataclass
+class MultiheadConfig:
+    """Operating point for the multi-head Tier 2 decision rule.
+
+    Block iff ``main >= main_threshold AND aux < aux_threshold``. Both fields
+    are required; there are no library defaults (the operating point depends
+    on the model's calibration sweep).
+    """
+
+    main_threshold: float
+    aux_threshold: float
 
 
 @dataclass
@@ -177,6 +196,13 @@ class Tier2Config:
     # ``None`` or empty list: all strings (matches TypeScript when ``tier2Fields`` is unset).
     # Non-empty list: only strings under those dict keys (full-depth collect).
     tier2_fields: list[str] | None = None
+    # Opt-in multi-head decision rule. When set and the ONNX model emits two
+    # logits per row, blocks iff ``main >= main_threshold AND aux < aux_threshold``.
+    multihead: MultiheadConfig | None = None
+    # Post-hoc temperature scaling applied in logit space before sigmoid.
+    # ``None`` falls back to the model's ``classifier_config.json:calibration``
+    # default if present, else 1.0 (raw sigmoid).
+    temperature_t: float | None = None
 
 
 @dataclass
@@ -210,7 +236,21 @@ class DefenseResult:
     detections: list[str]
     fields_sanitized: list[str]
     patterns_by_field: dict[str, list[str]]
+    # Effective (post-density / post-rule) Tier 2 score that drove the decision.
+    # Under multi-head aux veto this is explicitly ``0.0`` (not ``None``) so the
+    # operator triple ``(tier2_score, risk_level, allowed)`` reads coherently.
     tier2_score: float | None = None
+    # Pre-density / pre-rule global max-main score; forensic snapshot. ``None``
+    # when Tier 2 was skipped or no chunks were classified.
+    tier2_raw_score: float | None = None
+    # Aux-head score of the decision-relevant chunk under multi-head config.
+    # ``None`` under single-head (no aux signal).
+    tier2_aux_score: float | None = None
+    # Multi-head rule outcome: ``True`` iff at least one chunk satisfied
+    # ``main >= main_threshold AND aux < aux_threshold``; ``False`` when rule
+    # was evaluated but no chunk triggered (aux veto); ``None`` when no
+    # multi-head config is in effect.
+    tier2_multihead_blocked: bool | None = None
     tier2_skip_reason: str | None = None
     max_sentence: str | None = None
     fields_dropped: list[str] = field(default_factory=list)

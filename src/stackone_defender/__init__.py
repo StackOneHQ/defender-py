@@ -11,8 +11,8 @@ Usage:
         print(f"Blocked: {result.risk_level}")
 """
 
+from .classifiers.onnx_classifier import get_default_model_path
 from .core.prompt_defense import PromptDefense, create_prompt_defense
-from .utils.boundary import contains_boundary_patterns, generate_boundary_instructions
 from .sfe.preprocess import (
     DropDecision,
     SfePredictor,
@@ -21,11 +21,13 @@ from .sfe.preprocess import (
     get_default_sfe_model_path,
     sfe_preprocess,
 )
-from .types import DefenseResult, RiskLevel, Tier1Result
+from .types import DefenseResult, MultiheadConfig, RiskLevel, Tier1Result
+from .utils.boundary import contains_boundary_patterns, generate_boundary_instructions
 
 __all__ = [
     "DefenseResult",
     "DropDecision",
+    "MultiheadConfig",
     "PromptDefense",
     "RiskLevel",
     "SfePredictor",
@@ -34,6 +36,7 @@ __all__ = [
     "contains_boundary_patterns",
     "create_prompt_defense",
     "generate_boundary_instructions",
+    "get_default_model_path",
     "get_default_predictor",
     "get_default_sfe_model_path",
     "sfe_preprocess",

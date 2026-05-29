@@ -12,6 +12,7 @@ from typing import Any
 
 from ..classifiers.pattern_detector import PatternDetector, create_pattern_detector
 from ..config import DANGEROUS_KEYS, DEFAULT_CUMULATIVE_RISK_THRESHOLDS, DEFAULT_RISKY_FIELDS, DEFAULT_TRAVERSAL_CONFIG
+from ..sanitizers.encoding_detector import contains_suspicious_encoding_deep
 from ..sanitizers.sanitizer import Sanitizer, create_sanitizer
 from ..types import (
     CumulativeRiskTracker,
@@ -244,9 +245,36 @@ class ToolResultSanitizer:
                     # counters by the default field risk.
                     self._update_cumulative_risk(context.cumulative_risk, result.suggested_risk, tier1_patterns)
 
+        # Escalate risk when suspicious encoding is detected (ROT13, binary,
+        # Morse, HTML entities, ROT47, plus chained encodings like
+        # ``base64(base64(payload))``). These encodings don't trigger Tier 1
+        # patterns (no fast-filter keywords), so without this check the risk
+        # stays at the default ``medium`` and encoding detection in the
+        # sanitizer (Step 4, high-risk only) never runs. The deep multi-level
+        # check catches doubly-encoded payloads where the outer layer decodes
+        # to another encoded blob with no visible keywords. The deep check
+        # loops up to ``max_iterations`` (default 5) with an amplification
+        # guard so cost stays bounded.
+        escalated_from_encoding = False
+        if risk_level not in ("high", "critical"):
+            if contains_suspicious_encoding_deep(value):
+                risk_level = "high"
+                escalated_from_encoding = True
+                if context.cumulative_risk:
+                    self._update_cumulative_risk(context.cumulative_risk, risk_level, [])
+
         if self._block_high_risk and risk_level in ("high", "critical"):
             metadata.fields_sanitized.append(context.path)
-            metadata.methods_by_field[context.path] = ["pattern_removal"] if tier1_patterns else []
+            # Record what triggered the block so DefenseResult.fields_sanitized
+            # (which only counts active methods) and ``has_threats`` see this
+            # as a real threat -- otherwise an encoding-only escalation would
+            # keep ``allowed: True`` despite the redaction.
+            methods: list = []
+            if tier1_patterns:
+                methods.append("pattern_removal")
+            if escalated_from_encoding:
+                methods.append("encoding_detection")
+            metadata.methods_by_field[context.path] = methods
             if tier1_patterns:
                 metadata.patterns_removed_by_field[context.path] = tier1_patterns
             return "[CONTENT BLOCKED FOR SECURITY]"

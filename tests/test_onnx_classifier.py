@@ -9,7 +9,7 @@ from stackone_defender.classifiers.onnx_classifier import OnnxClassifier
 from stackone_defender.classifiers.tier2_classifier import Tier2Classifier
 
 # Skip ONNX tests if model files not present or on CI
-_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "minilm-full-aug")
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "minilm-multihead-v5")
 _HAS_MODEL = os.path.exists(os.path.join(_MODEL_PATH, "model_quantized.onnx"))
 _ON_CI = os.environ.get("CI") == "true"
 
@@ -141,10 +141,138 @@ class TestOnnxBatchChunkingNoModel:
 
         def fake_chunk(texts):
             calls.append(len(texts))
-            return [0.1] * len(texts)
+            return [(0.1, None)] * len(texts)
 
-        monkeypatch.setattr(classifier, "_classify_batch_chunk", fake_chunk)
+        monkeypatch.setattr(classifier, "_classify_batch_chunk_pair", fake_chunk)
         texts = [f"t{i}" for i in range(OnnxClassifier._MAX_BATCH_CHUNK + 5)]
         scores = classifier.classify_batch(texts)
         assert len(scores) == len(texts)
         assert calls == [OnnxClassifier._MAX_BATCH_CHUNK, 5]
+
+
+# ---------------------------------------------------------------------------
+# 0.7.0 parity: temperature validation, pair API, output-mode detection
+# ---------------------------------------------------------------------------
+
+
+class TestOnnxTemperatureValidation:
+    def test_default_temperature_one(self):
+        c = OnnxClassifier("/tmp/non-existent")
+        assert c.get_temperature() == 1.0
+
+    def test_accepts_positive_temperature(self):
+        c = OnnxClassifier("/tmp/non-existent", temperature_t=2.41)
+        assert c.get_temperature() == 2.41
+
+    def test_rejects_zero(self):
+        with pytest.raises(ValueError, match="positive finite"):
+            OnnxClassifier("/tmp/non-existent", temperature_t=0)
+
+    def test_rejects_negative(self):
+        with pytest.raises(ValueError, match="positive finite"):
+            OnnxClassifier("/tmp/non-existent", temperature_t=-1.0)
+
+    def test_rejects_nan(self):
+        with pytest.raises(ValueError, match="positive finite"):
+            OnnxClassifier("/tmp/non-existent", temperature_t=float("nan"))
+
+    def test_rejects_inf(self):
+        with pytest.raises(ValueError, match="positive finite"):
+            OnnxClassifier("/tmp/non-existent", temperature_t=float("inf"))
+
+
+class TestOnnxPairApiFake:
+    """Verify pair APIs against a fake double; no model files needed."""
+
+    def _classifier_with_fake_session(self, logits, dims, monkeypatch):
+        import numpy as np
+
+        c = OnnxClassifier("/tmp/non-existent")
+
+        class _FakeTokenizer:
+            class _Encoding:
+                ids = [101, 1, 102]
+                attention_mask = [1, 1, 1]
+
+            def encode(self, _text):
+                return _FakeTokenizer._Encoding()
+
+            def encode_batch(self, texts):
+                return [_FakeTokenizer._Encoding() for _ in texts]
+
+        class _FakeSession:
+            def __init__(self, logits_arr):
+                self.logits = logits_arr
+
+            def run(self, _outputs, _feeds):
+                return [self.logits]
+
+        c._tokenizer = _FakeTokenizer()
+        c._session = _FakeSession(np.array(logits, dtype=np.float32))
+        # Manually set up so ``_detect_output_mode`` works lazily.
+        return c
+
+    def test_classify_pair_single_head(self, monkeypatch):
+        # Single-head logit -> sigmoid main, aux is None.
+        c = self._classifier_with_fake_session([[0.0]], (1, 1), monkeypatch)
+        main, aux = c.classify_pair("hello")
+        assert 0.0 <= main <= 1.0
+        assert aux is None
+        assert c.get_output_mode() == "single"
+
+    def test_classify_pair_multi_head(self, monkeypatch):
+        # Dual-head logits -> sigmoid main + sigmoid aux.
+        c = self._classifier_with_fake_session([[2.0, -2.0]], (1, 2), monkeypatch)
+        main, aux = c.classify_pair("hello")
+        assert main > 0.5
+        assert aux is not None and aux < 0.5
+        assert c.get_output_mode() == "multi"
+
+    def test_classify_batch_pair_multi_head(self, monkeypatch):
+        c = self._classifier_with_fake_session(
+            [[2.0, -2.0], [0.0, 0.0]], (2, 2), monkeypatch
+        )
+        pairs = c.classify_batch_pair(["a", "b"])
+        assert len(pairs) == 2
+        # First row: high main, low aux
+        assert pairs[0][0] > 0.5
+        assert pairs[0][1] is not None and pairs[0][1] < 0.5
+        # Second row: both 0.5
+        assert abs(pairs[1][0] - 0.5) < 1e-6
+        assert abs((pairs[1][1] or 0.0) - 0.5) < 1e-6
+
+    def test_temperature_scaling_applied(self, monkeypatch):
+        import math
+
+        # Raw logit 1.0 -> sigmoid=0.731; with T=2 -> sigmoid(0.5)=0.622.
+        c = OnnxClassifier("/tmp/non-existent", temperature_t=2.0)
+        c._tokenizer = None  # avoid attr error in test setup
+        # Replace classifier session minimally
+        import numpy as np
+
+        class _Tok:
+            class _Encoding:
+                ids = [1]
+                attention_mask = [1]
+
+            def encode(self, _t):
+                return _Tok._Encoding()
+
+        class _Sess:
+            def run(self, _o, _f):
+                return [np.array([[1.0]], dtype=np.float32)]
+
+        c._tokenizer = _Tok()
+        c._session = _Sess()
+        main, aux = c.classify_pair("x")
+        expected = 1.0 / (1.0 + math.exp(-0.5))
+        assert abs(main - expected) < 1e-5
+        assert aux is None
+
+
+class TestGetDefaultModelPath:
+    def test_points_at_multihead_v5(self):
+        from stackone_defender.classifiers.onnx_classifier import get_default_model_path
+
+        path = get_default_model_path()
+        assert path.endswith(os.path.join("models", "minilm-multihead-v5"))

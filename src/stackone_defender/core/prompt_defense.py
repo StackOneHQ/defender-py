@@ -7,17 +7,58 @@ Provides a simple API for defending tool results against prompt injection.
 from __future__ import annotations
 
 import logging
+import math
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..classifiers.pattern_detector import PatternDetector, create_pattern_detector
 from ..classifiers.tier2_classifier import Tier2Classifier, create_tier2_classifier
 from ..config import MAX_TRAVERSAL_DEPTH, create_config
 from ..sfe.preprocess import SfePredictor, get_default_predictor, sfe_preprocess
-from ..types import DefenseResult, PromptDefenseConfig, RiskLevel, Tier1Result
+from ..types import DefenseResult, MultiheadConfig, PromptDefenseConfig, RiskLevel, Tier1Result
 from .tool_result_sanitizer import ToolResultSanitizer, create_tool_result_sanitizer
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Tier2Aggregate:
+    """Aggregated chunk-level scoring state before the decision branch.
+
+    Populated by :meth:`PromptDefense._tier2_score_strings`. Three pieces of
+    state coexist because the decision branch needs them all: per-string
+    max scores (for density damping), a global max-main pointer with its
+    aux companion (for the aux-veto branch's reported scores), and the
+    strongest rule-triggering chunk (for the rule-fire branch's reported
+    scores).
+    """
+
+    per_string_scores: list[float] = field(default_factory=list)
+    # Global max main score across all chunks, pre-density / pre-rule.
+    max_main: float | None = None
+    max_main_sentence: str | None = None
+    # Aux of the chunk that has the global-max main. Surfaced as
+    # ``tier2_aux_score`` on the aux-veto branch.
+    aux_of_max_main: float | None = None
+    # Strongest chunk satisfying the multi-head block rule, if any.
+    rule_any_fired: bool = False
+    rule_top_main: float = -1.0
+    rule_top_aux: float | None = None
+    rule_top_chunk: str = ""
+
+
+@dataclass
+class _Tier2Outcome:
+    """Final Tier 2 decision surface returned to ``defend_tool_result``."""
+
+    risk: RiskLevel = "low"
+    effective_score: float | None = None
+    raw_score: float | None = None
+    aux_score: float | None = None
+    multihead_blocked: bool | None = None
+    max_sentence: str | None = None
+    skip_reason: str | None = None
 
 
 def _extract_strings(
@@ -128,6 +169,20 @@ class PromptDefense:
 
         if enable_tier2:
             self._tier2 = create_tier2_classifier(tier2_config)
+            # Bug 1 fix: sync the gate's threshold copy with whatever
+            # Tier2Classifier resolved. ``Tier2Classifier`` merges hardcoded
+            # defaults < model ``classifier_config.json`` < caller-provided
+            # ``tier2_config``. Reading back here ensures the block gate at
+            # ``self._config.tier2.high_risk_threshold`` matches the
+            # ``get_risk_level`` thresholds used inside Tier 2. Without this
+            # readback, a model shipping calibrated defaults (e.g. v5 with
+            # ``high_risk_threshold = 0.64``) lands ``risk_level = "high"``
+            # at score 0.7 but ``allowed = True`` because the gate is still
+            # on the library default of 0.8.
+            if self._config.tier2 is not None:
+                effective = self._tier2.get_config()
+                self._config.tier2.high_risk_threshold = float(effective["high_risk_threshold"])
+                self._config.tier2.medium_risk_threshold = float(effective["medium_risk_threshold"])
 
     def warmup_tier2(self) -> None:
         if self._tier2:
@@ -184,106 +239,61 @@ class PromptDefense:
             if any(m in active_methods for m in methods)
         ]
 
-        # Tier 2: ML classification on strings from the SFE-filtered view (or full value if SFE off).
-        tier2_score: float | None = None
-        tier2_effective_score: float | None = None
-        max_sentence: str | None = None
-        tier2_risk: RiskLevel = "low"
-        tier2_skip_reason: str | None = None
-
-        if self._tier2:
-            fields_for_tier2 = (
-                self._tier2_fields if self._tier2_fields is not None else self._config.tier2.tier2_fields
-            )
-            strings = [
-                s
-                for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
-                if len(s) > 0
-            ]
-            if not strings:
-                scoped = fields_for_tier2 is not None and len(fields_for_tier2) > 0
-                if scoped:
-                    tier2_skip_reason = "No strings found in tier2_fields"
-                else:
-                    tier2_skip_reason = "No strings extracted from tool result"
-            else:
-                preps = [self._tier2.prepare_chunks(s) for s in strings]
-                all_chunks: list[str] = []
-                string_ranges: list[tuple[int, int]] = []
-                skip_reasons: set[str] = set()
-                for prep in preps:
-                    if prep.get("skipped", True):
-                        if prep.get("skip_reason"):
-                            skip_reasons.add(str(prep["skip_reason"]))
-                        string_ranges.append((-1, -1))
-                        continue
-                    chunks = prep.get("chunks", [])
-                    start_idx = len(all_chunks)
-                    all_chunks.extend(chunks)
-                    string_ranges.append((start_idx, len(all_chunks)))
-
-                if not all_chunks:
-                    tier2_skip_reason = (
-                        "All strings skipped by classifier"
-                        if not skip_reasons
-                        else f"All strings skipped by classifier: {'; '.join(sorted(skip_reasons))}"
-                    )
-                else:
-                    all_scores: list[float] | None = None
-                    try:
-                        all_scores = self._tier2.classify_chunks_batch(all_chunks)
-                    except Exception as e:
-                        tier2_skip_reason = f"Inference error: {e}"
-
-                    if all_scores is not None:
-                        per_string_scores: list[float] = []
-                        for start_idx, end_idx in string_ranges:
-                            if start_idx < 0:
-                                continue
-                            string_max = 0.0
-                            string_max_chunk = ""
-                            for chunk_idx in range(start_idx, end_idx):
-                                raw = all_scores[chunk_idx]
-                                safe_score = raw if isinstance(raw, (float, int)) and raw == raw else 0.0
-                                if safe_score > string_max:
-                                    string_max = safe_score
-                                    string_max_chunk = all_chunks[chunk_idx]
-                            per_string_scores.append(string_max)
-                            if tier2_score is None or string_max > tier2_score:
-                                tier2_score = string_max
-                                max_sentence = string_max_chunk
-
-                        tier2_effective_score = tier2_score
-                        density_sub_threshold = 0.75
-                        if tier2_score is not None and len(per_string_scores) > 2:
-                            high_count = len([s for s in per_string_scores if s >= density_sub_threshold])
-                            if high_count > 0:
-                                factor = (high_count / len(per_string_scores)) ** 0.1
-                                tier2_effective_score = tier2_score * factor
-
-                        if tier2_effective_score is not None:
-                            tier2_risk = self._tier2.get_risk_level(tier2_effective_score)
-
-        # Combine risk levels
-        tier1_idx = _RISK_LEVELS.index(sanitized.metadata.overall_risk_level)
-        tier2_idx = _RISK_LEVELS.index(tier2_risk)
-        risk_level = _RISK_LEVELS[max(tier1_idx, tier2_idx)]
-
-        # Determine whether any threat signals were found (Tier 1 or Tier 2).
-        # fields_sanitized captures sanitization methods (role stripping, encoding detection, etc.)
-        # that may fire without adding named pattern detections, so we include it here.
-        has_threats = (
-            len(detections) > 0
-            or len(fields_sanitized) > 0
-            or (tier2_effective_score is not None and tier2_effective_score >= self._config.tier2.high_risk_threshold)
+        # Tier 2 runs on the SFE-filtered view (full value if SFE off) and
+        # produces a self-contained outcome -- skip reason or the
+        # (effective, raw, aux, blocked, max_sentence, risk) tuple. The
+        # decision branches (single-head density, multi-head rule fire,
+        # multi-head aux veto) live in :meth:`_tier2_finalize`; see
+        # :class:`_Tier2Aggregate` for the score variable taxonomy.
+        # The classifier is passed in explicitly so the helpers don't
+        # need to ``assert self._tier2 is not None`` -- those asserts
+        # would be stripped under PYTHONOPTIMIZE.
+        tier2 = (
+            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag)
+            if self._tier2 is not None
+            else _Tier2Outcome()
         )
 
-        # Three cases for allowed:
-        # 1. block_high_risk is off -> always allow
-        # 2. No threat signals found -> allow (base risk from tool rules alone does not block)
-        # 3. Risk did not reach high/critical -> allow
-        allowed = not self._config.block_high_risk or not has_threats or risk_level not in ("high", "critical")
+        # Combine risk levels (take the higher of Tier 1 and Tier 2)
+        tier1_idx = _RISK_LEVELS.index(sanitized.metadata.overall_risk_level)
+        tier2_idx = _RISK_LEVELS.index(tier2.risk)
+        risk_level = _RISK_LEVELS[max(tier1_idx, tier2_idx)]
 
+        # Three-way Tier 2 threat derivation. In multi-head mode the rule
+        # replaces the threshold check: a flagged chunk under
+        # ``main >= main_thr AND aux < aux_thr`` is a Tier 2 threat; aux veto
+        # suppresses the threshold-based Tier 2 signal entirely.
+        if tier2.multihead_blocked is True:
+            tier2_has_threat = True
+        elif tier2.multihead_blocked is False:
+            tier2_has_threat = False
+        else:
+            tier2_has_threat = (
+                tier2.effective_score is not None
+                and tier2.effective_score >= self._config.tier2.high_risk_threshold
+            )
+
+        # Threat signals: Tier 1 detections, Tier 1 sanitization methods, or
+        # Tier 2 above-threshold (subject to multi-head veto).
+        has_threats = bool(detections) or bool(fields_sanitized) or tier2_has_threat
+
+        # Three cases for ``allowed``:
+        # 1. ``block_high_risk`` is off -> always allow.
+        # 2. No threat signals found -> allow (base risk from tool rules
+        #    alone does not block).
+        # 3. Risk did not reach high/critical -> allow.
+        allowed = (
+            not self._config.block_high_risk
+            or not has_threats
+            or risk_level not in ("high", "critical")
+        )
+
+        # ``tier2_score`` reports the effective score -- the value that
+        # drove the block decision. The multi-head aux veto path sets it
+        # to ``0.0`` (not ``None``), keeping the triple coherent:
+        # tier2_score=0 / risk_level low / allowed=true.
+        # ``tier2_raw_score`` is the pre-density / pre-rule max-chunk main
+        # score for forensics -- never use it to make decisions.
         return DefenseResult(
             allowed=allowed,
             risk_level=risk_level,
@@ -291,13 +301,281 @@ class PromptDefense:
             detections=detections,
             fields_sanitized=fields_sanitized,
             patterns_by_field=prm,
-            tier2_score=tier2_score,
-            tier2_skip_reason=tier2_skip_reason,
-            max_sentence=max_sentence,
+            tier2_score=tier2.effective_score,
+            tier2_raw_score=tier2.raw_score,
+            tier2_aux_score=tier2.aux_score,
+            tier2_multihead_blocked=tier2.multihead_blocked,
+            tier2_skip_reason=tier2.skip_reason,
+            max_sentence=tier2.max_sentence,
             fields_dropped=fields_dropped,
             truncated_at_depth=depth_flag["hit"] or None,
             latency_ms=(time.perf_counter() - start_time) * 1000,
         )
+
+    # ------------------------------------------------------------------
+    # Tier 2 helpers
+    # ------------------------------------------------------------------
+    #
+    # ``defend_tool_result`` orchestrates Tier 1 + Tier 2. The Tier 2 path
+    # is split into five focused steps below to keep that orchestration
+    # readable and to let each branch be unit-tested in isolation.
+
+    def _evaluate_tier2(
+        self,
+        tier2: Tier2Classifier,
+        sfe_filtered_value: Any,
+        depth_flag: dict[str, bool],
+    ) -> _Tier2Outcome:
+        """Run the Tier 2 pipeline end to end for one tool result.
+
+        ``tier2`` is passed explicitly (rather than read from
+        ``self._tier2``) so the type system can prove non-``None``
+        without runtime asserts; asserts would be stripped under
+        ``PYTHONOPTIMIZE``.
+        """
+        out = _Tier2Outcome()
+
+        fields_for_tier2 = (
+            self._tier2_fields
+            if self._tier2_fields is not None
+            else self._config.tier2.tier2_fields
+        )
+        strings = [
+            s
+            for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
+            if len(s) > 0
+        ]
+        if not strings:
+            scoped = fields_for_tier2 is not None and len(fields_for_tier2) > 0
+            out.skip_reason = (
+                "No strings found in tier2_fields"
+                if scoped
+                else "No strings extracted from tool result"
+            )
+            return out
+
+        all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
+        if not all_chunks:
+            out.skip_reason = (
+                "All strings skipped by classifier"
+                if not skip_reasons
+                else f"All strings skipped by classifier: {'; '.join(sorted(skip_reasons))}"
+            )
+            return out
+
+        multihead_cfg = tier2.get_multihead_config()
+        all_scores, all_pairs, infer_skip = self._tier2_run_inference(
+            tier2, all_chunks, multihead_cfg
+        )
+        if infer_skip is not None:
+            out.skip_reason = infer_skip
+        if all_scores is None:
+            return out
+
+        agg = self._tier2_score_strings(
+            all_chunks, all_scores, all_pairs, string_ranges, multihead_cfg
+        )
+        out.raw_score = agg.max_main
+        out.max_sentence = agg.max_main_sentence
+        self._tier2_finalize(tier2, out, agg, multihead_cfg)
+        return out
+
+    @staticmethod
+    def _tier2_build_chunks(
+        tier2: Tier2Classifier,
+        strings: list[str],
+    ) -> tuple[list[str], list[tuple[int, int]], set[str]]:
+        """Run ``prepare_chunks`` per string and flatten into one chunk list.
+
+        ``string_ranges[i] = (start, end)`` is the half-open slice of
+        ``all_chunks`` belonging to ``strings[i]``. A range of ``(-1, -1)``
+        marks a string that the classifier skipped (too short, etc.).
+        """
+        all_chunks: list[str] = []
+        string_ranges: list[tuple[int, int]] = []
+        skip_reasons: set[str] = set()
+        for prep in (tier2.prepare_chunks(s) for s in strings):
+            if prep.get("skipped", True):
+                if prep.get("skip_reason"):
+                    skip_reasons.add(str(prep["skip_reason"]))
+                string_ranges.append((-1, -1))
+                continue
+            chunks = prep.get("chunks", [])
+            start_idx = len(all_chunks)
+            all_chunks.extend(chunks)
+            string_ranges.append((start_idx, len(all_chunks)))
+        return all_chunks, string_ranges, skip_reasons
+
+    @staticmethod
+    def _tier2_run_inference(
+        tier2: Tier2Classifier,
+        all_chunks: list[str],
+        multihead_cfg: MultiheadConfig | None,
+    ) -> tuple[list[float] | None, list[tuple[float, float | None]] | None, str | None]:
+        """Run classifier inference with the multi-head misconfig guard.
+
+        Returns ``(all_scores, all_pairs, skip_reason)``. ``skip_reason``
+        is non-``None`` either on inference failure or when ``multihead``
+        is configured but the model emits only single-head logits -- in
+        that case ``all_pairs`` is forced to ``None`` so the caller falls
+        back to the single-head decision path instead of silently
+        disabling Tier 2 via the aux-veto branch.
+        """
+        try:
+            if multihead_cfg is not None:
+                pairs = tier2.classify_chunks_batch_pair(all_chunks)
+                if pairs and all(p[1] is None for p in pairs):
+                    return (
+                        None,
+                        None,
+                        "multihead configured but model emits single-head logits"
+                        " -- remove `multihead` config or use a dual-head model",
+                    )
+                return [p[0] for p in pairs], pairs, None
+            scores = tier2.classify_chunks_batch(all_chunks)
+            return scores, None, None
+        except Exception as e:
+            return None, None, f"Inference error: {e}"
+
+    @staticmethod
+    def _coerce_safe_score(raw: Any) -> float:
+        """Coerce a classifier output to a finite float, treating NaN as 0.0."""
+        if isinstance(raw, (float, int)) and raw == raw:  # NaN != NaN
+            return float(raw)
+        return 0.0
+
+    @staticmethod
+    def _apply_multihead_rule(
+        agg: _Tier2Aggregate,
+        chunk: str,
+        main_score: float,
+        aux_raw: float | None,
+        multihead_cfg: MultiheadConfig | None,
+        all_pairs_present: bool,
+    ) -> None:
+        """Update ``agg`` with this chunk's contribution to the multi-head rule.
+
+        Guard-clause style early returns keep the call site flat. The rule
+        fires when ``main >= main_threshold AND aux < aux_threshold``;
+        when it does, we track the strongest such chunk so the rule-fire
+        branch can surface it.
+        """
+        if multihead_cfg is None or not all_pairs_present or aux_raw is None:
+            return
+        if main_score < multihead_cfg.main_threshold:
+            return
+        if aux_raw >= multihead_cfg.aux_threshold:
+            return
+        agg.rule_any_fired = True
+        if main_score > agg.rule_top_main:
+            agg.rule_top_main = main_score
+            agg.rule_top_aux = aux_raw
+            agg.rule_top_chunk = chunk
+
+    @classmethod
+    def _tier2_score_strings(
+        cls,
+        all_chunks: list[str],
+        all_scores: list[float],
+        all_pairs: list[tuple[float, float | None]] | None,
+        string_ranges: list[tuple[int, int]],
+        multihead_cfg: MultiheadConfig | None,
+    ) -> _Tier2Aggregate:
+        """Aggregate chunk-level scores into per-string + multi-head state.
+
+        Walks each non-skipped string's chunk slice once, tracking three
+        independent maxima: the per-string max (for density damping), the
+        global max-main pointer with its aux companion (used by the aux-
+        veto branch for reporting), and the strongest chunk satisfying the
+        multi-head block rule (used by the rule-fire branch for reporting).
+        """
+        agg = _Tier2Aggregate()
+        pairs_present = all_pairs is not None
+        for start_idx, end_idx in string_ranges:
+            if start_idx < 0:
+                continue
+            s_max = 0.0
+            s_max_chunk = ""
+            s_max_aux: float | None = None
+            for j in range(start_idx, end_idx):
+                chunk = all_chunks[j]
+                safe_score = cls._coerce_safe_score(all_scores[j])
+                aux_raw = all_pairs[j][1] if all_pairs is not None else None
+                if safe_score > s_max:
+                    s_max = safe_score
+                    s_max_chunk = chunk
+                    s_max_aux = aux_raw if pairs_present else None
+                cls._apply_multihead_rule(
+                    agg, chunk, safe_score, aux_raw, multihead_cfg, pairs_present
+                )
+            agg.per_string_scores.append(s_max)
+            if agg.max_main is None or s_max > agg.max_main:
+                agg.max_main = s_max
+                agg.max_main_sentence = s_max_chunk
+                agg.aux_of_max_main = s_max_aux
+        return agg
+
+    @staticmethod
+    def _tier2_finalize(
+        tier2: Tier2Classifier,
+        out: _Tier2Outcome,
+        agg: _Tier2Aggregate,
+        multihead_cfg: MultiheadConfig | None,
+    ) -> None:
+        """Resolve aggregated scores into the public outcome surface.
+
+        Exactly one of three branches runs:
+
+        * **Multi-head rule fire** -- the rule's chunk-level signal is
+          already the decision; density damping is intentionally skipped.
+        * **Multi-head aux veto** -- the rule rescued the content;
+          ``effective_score`` collapses to ``0.0`` so the operator triple
+          ``(tier2_score, risk_level, allowed)`` reads as zero / low /
+          true. The high main score is still available via
+          ``raw_score`` and the rescuing aux via ``aux_score``.
+        * **Single-head** -- cross-string density damping (only when 3+
+          strings); then bucket into a risk level. Density sub-threshold
+          rescales with temperature (Bug 2 fix in TS 0.7.0).
+        """
+        if multihead_cfg is not None:
+            out.multihead_blocked = agg.rule_any_fired
+            if agg.rule_any_fired:
+                out.risk = "high"
+                out.max_sentence = agg.rule_top_chunk
+                out.effective_score = agg.rule_top_main
+                out.aux_score = agg.rule_top_aux
+            else:
+                out.risk = "low"
+                out.effective_score = 0.0
+                out.aux_score = agg.aux_of_max_main
+            return
+
+        if agg.max_main is None:
+            return
+
+        # Single-head density damping. Fires only on 3+ strings -- a 1-
+        # or 2-string payload is mathematically indistinguishable from a
+        # real short attack and damping there would create false
+        # negatives. Factor ``pow(high_count/total, 0.1)`` is gentle:
+        # 1/100 -> 0.63x, 1/10 -> 0.79x, 5/10 -> 0.93x.
+        #
+        # Bug 2 fix (TS 0.7.0 parity): rescale the "high" cutoff with
+        # temperature. Raw 0.75 corresponds to logit log(3); under
+        # ``T > 1`` the cutoff is ``sigmoid(log(3)/T)``. At T=1 this is
+        # 0.75 (no-op); at T=2.41 it is ~0.612.
+        out.effective_score = agg.max_main
+        t = tier2.get_temperature() or 1.0
+        density_sub_threshold = (
+            0.75 if t == 1.0 else 1.0 / (1.0 + math.exp(-math.log(3.0) / t))
+        )
+        if len(agg.per_string_scores) > 2:
+            high_count = sum(
+                1 for s in agg.per_string_scores if s >= density_sub_threshold
+            )
+            if high_count > 0:
+                factor = (high_count / len(agg.per_string_scores)) ** 0.1
+                out.effective_score = agg.max_main * factor
+        out.risk = tier2.get_risk_level(out.effective_score)
 
     def defend_tool_results(self, items: list[dict[str, Any]]) -> list[DefenseResult]:
         """Defend multiple tool results."""
