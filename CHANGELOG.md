@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.6.3...stackone-defender-v0.7.0) (2026-05-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* The default ONNX model directory changed from minilm-full-aug to minilm-multihead-v5. Custom code that hardcoded the old path will no longer load.
+
+### Features
+
+* parity with TS defender 0.7.0 ([75d046a](https://github.com/StackOneHQ/stackone-defender/commit/75d046ab45066ee1f973e91357f7ecb23dea50c8))
+
 ## [0.6.3](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.6.2...stackone-defender-v0.6.3) (2026-05-26)
 
 
