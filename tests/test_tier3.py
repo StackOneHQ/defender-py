@@ -151,14 +151,22 @@ class TestPromptDefenseTier3InputCap:
 @patch("stackone_defender.core.prompt_defense.create_tier2_classifier")
 class TestPromptDefenseTier3Cascade:
     @staticmethod
-    def _tier2_mock(score: float = 0.5, chunk: str = "suspicious chunk"):
+    def _tier2_mock(
+        score: float = 0.5,
+        *,
+        high_risk_threshold: float = 0.0,
+        medium_risk_threshold: float = 0.0,
+    ):
         mock_t2 = MagicMock()
         mock_t2.get_risk_level.return_value = "high"
         mock_t2.get_multihead_config.return_value = None
         mock_t2.get_temperature.return_value = 1.0
         mock_t2.prepare_chunks.side_effect = lambda s: {"chunks": [s], "skipped": False}
         mock_t2.classify_chunks_batch.side_effect = lambda chunks: [score] * len(chunks)
-        mock_t2.get_config.return_value = {"high_risk_threshold": 0.8, "medium_risk_threshold": 0.5}
+        mock_t2.get_config.return_value = {
+            "high_risk_threshold": high_risk_threshold,
+            "medium_risk_threshold": medium_risk_threshold,
+        }
         return mock_t2
 
     def test_does_not_call_provider_when_tier2_disabled(self, mock_create):
@@ -289,3 +297,29 @@ class TestPromptDefenseTier3VerdictValidation:
         result = asyncio.run(defense.defend_tool_result_async({"body": "anything"}, "test_tool"))
         assert isinstance(result.tier3, Tier3Skip)
         assert "non-object verdict" in result.tier3.skip_reason.lower()
+
+
+class TestPromptDefenseDefenderModeValidation:
+    def test_invalid_defender_mode_falls_back_to_cascade(self, caplog):
+        defense = create_prompt_defense(enable_tier3=True, defender_mode="casacde")  # type: ignore[arg-type]
+        assert defense._defender_mode == "cascade"
+        assert any("defender_mode" in r.message for r in caplog.records)
+
+
+class TestTier3ProviderKeywordContext:
+    def test_keyword_only_classify_is_supported(self):
+        class KeywordOnlyProvider:
+            def classify(self, text: str, *, ctx: dict | None = None) -> Tier3Verdict:
+                assert ctx is not None and ctx.get("toolName") == "test_tool"
+                return Tier3Verdict(decision="allow")
+
+        set_default_tier3_provider(KeywordOnlyProvider())
+        defense = create_prompt_defense(
+            enable_tier1=False,
+            enable_tier2=False,
+            enable_tier3=True,
+            defender_mode="tier3_only",
+        )
+        result = asyncio.run(defense.defend_tool_result_async({"body": "hello"}, "test_tool"))
+        assert isinstance(result.tier3, Tier3Verdict)
+        assert result.tier3.decision == "allow"

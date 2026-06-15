@@ -136,6 +136,29 @@ def _extract_strings(
     return strings
 
 
+def _bounded_join_strings(strings: list[str], max_len: int, sep: str = "\n") -> str:
+    """Join strings with ``sep``, capping total length at ``max_len`` without building the full join first."""
+    if max_len <= 0:
+        return ""
+    parts: list[str] = []
+    used = 0
+    sep_len = len(sep)
+    for s in strings:
+        if not s:
+            continue
+        prefix = sep_len if parts else 0
+        if used + prefix >= max_len:
+            break
+        remaining = max_len - used - prefix
+        if len(s) <= remaining:
+            parts.append(s)
+            used += prefix + len(s)
+        else:
+            parts.append(s[:remaining])
+            break
+    return sep.join(parts)
+
+
 _RISK_LEVELS: list[RiskLevel] = ["low", "medium", "high", "critical"]
 
 
@@ -206,6 +229,13 @@ class PromptDefense:
                 self._config.tier2.medium_risk_threshold = float(effective["medium_risk_threshold"])
 
         self._tier3_enabled = enable_tier3
+        if defender_mode not in ("cascade", "tier3_only"):
+            _logger.warning(
+                '[defender] invalid defender_mode %r — must be "cascade" or "tier3_only". '
+                'Falling back to "cascade".',
+                defender_mode,
+            )
+            defender_mode = "cascade"
         self._defender_mode: DefenderMode = defender_mode
         self._tier3_custom_provider: Tier3Provider | None = None
         self._tier3_band = _DEFAULT_TIER3_BAND
@@ -292,7 +322,7 @@ class PromptDefense:
     @staticmethod
     async def _invoke_tier3_classify(provider: Tier3Provider, text: str, tool_name: str) -> Any:
         ctx = {"toolName": tool_name}
-        result = provider.classify(text, ctx)
+        result = provider.classify(text, ctx=ctx)
         if inspect.isawaitable(result):
             return await result
         return result
@@ -390,12 +420,7 @@ class PromptDefense:
         start_time: float,
     ) -> DefenseResult:
         strings = [s for s in _extract_strings(value, None, depth_flag) if len(s) > 0]
-        joined = "\n".join(strings)
-        bounded = (
-            joined[: self._tier3_max_text_length]
-            if len(joined) > self._tier3_max_text_length
-            else joined
-        )
+        bounded = _bounded_join_strings(strings, self._tier3_max_text_length)
 
         verdict: Tier3Verdict | None = None
         skip_reason: str | None = None

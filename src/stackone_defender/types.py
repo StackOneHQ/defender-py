@@ -97,6 +97,7 @@ class Tier3Provider(Protocol):
     def classify(
         self,
         text: str,
+        *,
         ctx: dict[str, Any] | None = None,
     ) -> Tier3Verdict | Any:
         """Classify text for prompt-injection risk (sync or awaitable)."""
