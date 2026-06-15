@@ -323,3 +323,58 @@ class TestTier3ProviderKeywordContext:
         result = asyncio.run(defense.defend_tool_result_async({"body": "hello"}, "test_tool"))
         assert isinstance(result.tier3, Tier3Verdict)
         assert result.tier3.decision == "allow"
+
+
+class TestDefendToolResultsAsync:
+    def test_empty_list_returns_empty(self):
+        defense = create_prompt_defense()
+        result = asyncio.run(defense.defend_tool_results_async([]))
+        assert result == []
+
+    def test_preserves_order(self):
+        defense = create_prompt_defense(enable_tier1=False, enable_tier2=False)
+        items = [
+            {"value": {"body": "first"}, "tool_name": "t1"},
+            {"value": {"body": "second"}, "tool_name": "t2"},
+            {"value": {"body": "third"}, "tool_name": "t3"},
+        ]
+        results = asyncio.run(defense.defend_tool_results_async(items))
+        assert len(results) == 3
+        assert all(r.allowed for r in results)
+
+    def test_tier3_batch_parallel(self):
+        call_order: list[str] = []
+
+        class RecordingProvider:
+            async def classify(self, text: str, *, ctx: dict | None = None) -> Tier3Verdict:
+                call_order.append(ctx.get("toolName", "") if ctx else "")
+                return Tier3Verdict(decision="allow")
+
+        set_default_tier3_provider(RecordingProvider())
+        defense = create_prompt_defense(
+            enable_tier1=False,
+            enable_tier2=False,
+            enable_tier3=True,
+            defender_mode="tier3_only",
+        )
+        items = [
+            {"value": {"body": "a"}, "tool_name": "tool_a"},
+            {"value": {"body": "b"}, "tool_name": "tool_b"},
+        ]
+        results = asyncio.run(defense.defend_tool_results_async(items))
+        assert len(results) == 2
+        assert all(isinstance(r.tier3, Tier3Verdict) for r in results)
+        assert set(call_order) == {"tool_a", "tool_b"}
+
+    def test_sync_batch_with_tier3_uses_async_path(self):
+        set_default_tier3_provider(_make_provider("allow"))
+        defense = create_prompt_defense(
+            enable_tier1=False,
+            enable_tier2=False,
+            enable_tier3=True,
+            defender_mode="tier3_only",
+        )
+        items = [{"value": {"body": "x"}, "tool_name": "test_tool"}]
+        results = defense.defend_tool_results(items)
+        assert len(results) == 1
+        assert isinstance(results[0].tier3, Tier3Verdict)

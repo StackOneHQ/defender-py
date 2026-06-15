@@ -178,6 +178,8 @@ class DefenseResult:
 
 ### `defense.defend_tool_results(items)`
 
+Sync batch API. When `enable_tier3=True`, uses one `asyncio.run()` and defends items **in parallel** (same idea as npm `defendToolResults`). From async code, prefer `defend_tool_results_async`.
+
 ```python
 results = defense.defend_tool_results([
     {"value": email_data, "tool_name": "gmail_get_message"},
@@ -187,6 +189,17 @@ results = defense.defend_tool_results([
 for r in results:
     if not r.allowed:
         print("Blocked:", ", ".join(r.fields_sanitized))
+```
+
+### `await defense.defend_tool_results_async(items)`
+
+Async batch API — parallel `defend_tool_result_async` per item. Required when Tier 3 is enabled inside a running event loop (e.g. FastAPI).
+
+```python
+results = await defense.defend_tool_results_async([
+    {"value": email_data, "tool_name": "gmail_get_message"},
+    {"value": doc_data, "tool_name": "documents_get"},
+])
 ```
 
 ### `defense.analyze(text)`

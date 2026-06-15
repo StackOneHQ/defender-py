@@ -956,8 +956,36 @@ class PromptDefense:
         out.risk = tier2.get_risk_level(out.effective_score)
 
     def defend_tool_results(self, items: list[dict[str, Any]]) -> list[DefenseResult]:
-        """Defend multiple tool results."""
+        """Defend multiple tool results (sequential when Tier 3 is off).
+
+        When ``enable_tier3`` is on, delegates to :meth:`defend_tool_results_async`
+        via ``asyncio.run`` (parallel per item, matching npm ``defendToolResults``).
+        Use the async method directly inside a running event loop.
+        """
+        if self._tier3_enabled:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self.defend_tool_results_async(items))
+            raise RuntimeError(
+                "defend_tool_results() cannot call Tier 3 from a running event loop; "
+                "use: await defense.defend_tool_results_async(items)"
+            )
         return [self.defend_tool_result(item["value"], item["tool_name"]) for item in items]
+
+    async def defend_tool_results_async(self, items: list[dict[str, Any]]) -> list[DefenseResult]:
+        """Defend multiple tool results concurrently (npm ``defendToolResults`` parity).
+
+        Runs :meth:`defend_tool_result_async` per item in parallel via ``asyncio.gather``.
+        Result order matches ``items``.
+        """
+        if not items:
+            return []
+        return list(
+            await asyncio.gather(
+                *(self.defend_tool_result_async(item["value"], item["tool_name"]) for item in items)
+            )
+        )
 
     def analyze(self, text: str) -> Tier1Result:
         """Analyze text for injection patterns (Tier 1 only)."""
