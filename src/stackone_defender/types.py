@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, Union, runtime_checkable
 
@@ -83,6 +84,11 @@ class Tier3Skip:
 
 Tier3Result = Tier3Verdict | Tier3Skip
 
+# Provider return type: sync verdict object/dict, or an awaitable of either.
+Tier3ClassifyResult = (
+    Tier3Verdict | dict[str, Any] | Awaitable[Tier3Verdict | dict[str, Any]]
+)
+
 
 @dataclass
 class Tier3EscalationBand:
@@ -99,7 +105,7 @@ class Tier3Provider(Protocol):
         text: str,
         *,
         ctx: dict[str, Any] | None = None,
-    ) -> Tier3Verdict | Any:
+    ) -> Tier3ClassifyResult:
         """Classify text for prompt-injection risk (sync or awaitable)."""
         ...
 

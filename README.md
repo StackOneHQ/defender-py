@@ -178,7 +178,7 @@ class DefenseResult:
 
 ### `defense.defend_tool_results(items)`
 
-Sync batch API. When `enable_tier3=True`, uses one `asyncio.run()` and defends items **in parallel** (same idea as npm `defendToolResults`). From async code, prefer `defend_tool_results_async`.
+Sync batch API. When `enable_tier3=True`, uses one `asyncio.run()` and defends items **concurrently** via `asyncio.gather` (same scheduling model as npm `defendToolResults`; blocking sync providers still run one at a time on the event-loop thread). From async code, prefer `defend_tool_results_async`.
 
 ```python
 results = defense.defend_tool_results([
@@ -193,7 +193,7 @@ for r in results:
 
 ### `await defense.defend_tool_results_async(items)`
 
-Async batch API — parallel `defend_tool_result_async` per item. Required when Tier 3 is enabled inside a running event loop (e.g. FastAPI).
+Async batch API — runs `defend_tool_result_async` per item concurrently via `asyncio.gather`. Required when Tier 3 is enabled inside a running event loop (e.g. FastAPI).
 
 ```python
 results = await defense.defend_tool_results_async([
