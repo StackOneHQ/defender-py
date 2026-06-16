@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.1](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.7.0...stackone-defender-v0.7.1) (2026-06-16)
+
+
+### Features
+
+* add defend_tool_results_async for npm batch parity ([a05783c](https://github.com/StackOneHQ/stackone-defender/commit/a05783c5671548aa66dfead1f129584b249d8778))
+* Python parity with @stackone/defender 0.7.1 (Tier 3) ([c58a17c](https://github.com/StackOneHQ/stackone-defender/commit/c58a17c9ba1a902148cde9204666f7f1a916d09b))
+* Tier 3 provider interface and cascade orchestration (TS 0.7.1 parity) ([f2b4109](https://github.com/StackOneHQ/stackone-defender/commit/f2b41096db4ca65741b9d4ba62f3fad7591929ab))
+
+
+### Bug Fixes
+
+* address Copilot PR review on Tier 3 orchestration ([570f567](https://github.com/StackOneHQ/stackone-defender/commit/570f56753292700a15b73725a12db426316468c6))
+* tighten Tier3ClassifyResult type and batch doc wording ([2515772](https://github.com/StackOneHQ/stackone-defender/commit/2515772f894dd2cbdaa51e9d0b39e26f151d257f))
+
 ## [0.7.0](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.6.3...stackone-defender-v0.7.0) (2026-05-29)
 
 
