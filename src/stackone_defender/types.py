@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Any, Literal, Union
+from typing import Any, Literal, Protocol, Union, runtime_checkable
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
+
+DefenderMode = Literal["cascade", "tier3_only"]
+
+Tier3Decision = Literal["block", "allow"]
 
 PatternCategory = Literal[
     "role_marker",
@@ -58,6 +63,51 @@ class Tier1Result:
     has_detections: bool
     suggested_risk: RiskLevel
     latency_ms: float
+
+
+@dataclass
+class Tier3Verdict:
+    """Authoritative block/allow decision from a Tier 3 provider."""
+
+    decision: Tier3Decision
+    score: float | None = None
+    raw: Any = None
+    latency_ms: float | None = None
+
+
+@dataclass
+class Tier3Skip:
+    """Tier 3 was invoked but did not return a usable verdict."""
+
+    skip_reason: str
+
+
+Tier3Result = Tier3Verdict | Tier3Skip
+
+# Provider return type: sync verdict object/dict, or an awaitable of either.
+Tier3ClassifyResult = (
+    Tier3Verdict | dict[str, Any] | Awaitable[Tier3Verdict | dict[str, Any]]
+)
+
+
+@dataclass
+class Tier3EscalationBand:
+    lower: float
+    upper: float
+
+
+@runtime_checkable
+class Tier3Provider(Protocol):
+    """Tier 3 classifier interface — implementations live outside this package."""
+
+    def classify(
+        self,
+        text: str,
+        *,
+        ctx: dict[str, Any] | None = None,
+    ) -> Tier3ClassifyResult:
+        """Classify text for prompt-injection risk (sync or awaitable)."""
+        ...
 
 
 @dataclass
@@ -253,6 +303,9 @@ class DefenseResult:
     tier2_multihead_blocked: bool | None = None
     tier2_skip_reason: str | None = None
     max_sentence: str | None = None
+    # Set when Tier 3 ran (cascade escalation or tier3_only). ``None`` when Tier 3
+    # did not run — use ``result.tier3 is not None`` as the "Tier 3 ran" check.
+    tier3: Tier3Result | None = None
     fields_dropped: list[str] = field(default_factory=list)
     truncated_at_depth: bool | None = None
     latency_ms: float = 0.0

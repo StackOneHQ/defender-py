@@ -6,6 +6,8 @@ Provides a simple API for defending tool results against prompt injection.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import math
 import time
@@ -14,12 +16,28 @@ from typing import Any
 
 from ..classifiers.pattern_detector import PatternDetector, create_pattern_detector
 from ..classifiers.tier2_classifier import Tier2Classifier, create_tier2_classifier
+from ..classifiers.tier3_orchestrator import get_default_tier3_provider
 from ..config import MAX_TRAVERSAL_DEPTH, create_config
 from ..sfe.preprocess import SfePredictor, get_default_predictor, sfe_preprocess
-from ..types import DefenseResult, MultiheadConfig, PromptDefenseConfig, RiskLevel, Tier1Result
+from ..types import (
+    DefenderMode,
+    DefenseResult,
+    MultiheadConfig,
+    PromptDefenseConfig,
+    RiskLevel,
+    Tier1Result,
+    Tier3EscalationBand,
+    Tier3Provider,
+    Tier3Result,
+    Tier3Skip,
+    Tier3Verdict,
+)
 from .tool_result_sanitizer import ToolResultSanitizer, create_tool_result_sanitizer
 
 _logger = logging.getLogger(__name__)
+
+_DEFAULT_TIER3_BAND = Tier3EscalationBand(lower=0.3, upper=0.85)
+_DEFAULT_TIER3_MAX_TEXT_LENGTH = 10000
 
 
 @dataclass
@@ -118,6 +136,29 @@ def _extract_strings(
     return strings
 
 
+def _bounded_join_strings(strings: list[str], max_len: int, sep: str = "\n") -> str:
+    """Join strings with ``sep``, capping total length at ``max_len`` without building the full join first."""
+    if max_len <= 0:
+        return ""
+    parts: list[str] = []
+    used = 0
+    sep_len = len(sep)
+    for s in strings:
+        if not s:
+            continue
+        prefix = sep_len if parts else 0
+        if used + prefix >= max_len:
+            break
+        remaining = max_len - used - prefix
+        if len(s) <= remaining:
+            parts.append(s)
+            used += prefix + len(s)
+        else:
+            parts.append(s[:remaining])
+            break
+    return sep.join(parts)
+
+
 _RISK_LEVELS: list[RiskLevel] = ["low", "medium", "high", "critical"]
 
 
@@ -136,6 +177,9 @@ class PromptDefense:
         block_high_risk: bool = False,
         default_risk_level: RiskLevel = "medium",
         annotate_boundary: bool = False,
+        enable_tier3: bool = False,
+        defender_mode: DefenderMode = "cascade",
+        tier3: dict[str, Any] | None = None,
     ):
         self._config: PromptDefenseConfig = create_config(config)
         if block_high_risk:
@@ -184,6 +228,53 @@ class PromptDefense:
                 self._config.tier2.high_risk_threshold = float(effective["high_risk_threshold"])
                 self._config.tier2.medium_risk_threshold = float(effective["medium_risk_threshold"])
 
+        self._tier3_enabled = enable_tier3
+        if defender_mode not in ("cascade", "tier3_only"):
+            _logger.warning(
+                '[defender] invalid defender_mode %r — must be "cascade" or "tier3_only". '
+                'Falling back to "cascade".',
+                defender_mode,
+            )
+            defender_mode = "cascade"
+        self._defender_mode: DefenderMode = defender_mode
+        self._tier3_custom_provider: Tier3Provider | None = None
+        self._tier3_band = _DEFAULT_TIER3_BAND
+        self._tier3_max_text_length = _DEFAULT_TIER3_MAX_TEXT_LENGTH
+        self._tier3_missing_provider_warned = False
+        tier3_opts = tier3 or {}
+        if tier3_opts.get("provider") is not None:
+            self._tier3_custom_provider = tier3_opts["provider"]
+        max_text_length = tier3_opts.get("max_text_length", tier3_opts.get("maxTextLength"))
+        if max_text_length is not None:
+            if isinstance(max_text_length, (int, float)) and math.isfinite(max_text_length) and max_text_length > 0:
+                self._tier3_max_text_length = int(max_text_length)
+            else:
+                _logger.warning(
+                    "[defender] invalid tier3.max_text_length %s — must be a positive finite number. "
+                    "Falling back to default %s.",
+                    max_text_length,
+                    _DEFAULT_TIER3_MAX_TEXT_LENGTH,
+                )
+        escalation_band = tier3_opts.get("escalation_band", tier3_opts.get("escalationBand"))
+        if escalation_band is not None:
+            lower = escalation_band.get("lower")
+            upper = escalation_band.get("upper")
+            if (
+                isinstance(lower, (int, float))
+                and isinstance(upper, (int, float))
+                and math.isfinite(lower)
+                and math.isfinite(upper)
+                and 0 <= lower < upper <= 1
+            ):
+                self._tier3_band = Tier3EscalationBand(lower=float(lower), upper=float(upper))
+            else:
+                _logger.warning(
+                    "[defender] invalid tier3.escalation_band { lower: %s, upper: %s } — "
+                    "must satisfy 0 <= lower < upper <= 1. Falling back to default { lower: 0.3, upper: 0.85 }.",
+                    lower,
+                    upper,
+                )
+
     def warmup_tier2(self) -> None:
         if self._tier2:
             self._tier2.warmup()
@@ -198,15 +289,310 @@ class PromptDefense:
     def is_tier2_ready(self) -> bool:
         return self._tier2.is_ready() if self._tier2 else False
 
+    def _resolve_tier3_provider(self) -> Tier3Provider | None:
+        return self._tier3_custom_provider or get_default_tier3_provider()
+
+    @staticmethod
+    def _validate_tier3_verdict(verdict: Any) -> Tier3Verdict | Tier3Skip:
+        if isinstance(verdict, Tier3Verdict):
+            if verdict.decision in ("block", "allow"):
+                return verdict
+            return Tier3Skip(
+                skip_reason=(
+                    f'Tier 3 provider returned invalid decision: {verdict.decision!r} '
+                    '(expected "block" | "allow")'
+                )
+            )
+        if verdict is None or not isinstance(verdict, dict):
+            return Tier3Skip(
+                skip_reason=f"Tier 3 provider returned non-object verdict: {type(verdict).__name__}"
+            )
+        decision = verdict.get("decision")
+        if decision not in ("block", "allow"):
+            return Tier3Skip(
+                skip_reason=f'Tier 3 provider returned invalid decision: {decision!r} (expected "block" | "allow")'
+            )
+        return Tier3Verdict(
+            decision=decision,
+            score=verdict.get("score"),
+            raw=verdict.get("raw"),
+            latency_ms=verdict.get("latency_ms", verdict.get("latencyMs")),
+        )
+
+    @staticmethod
+    async def _invoke_tier3_classify(provider: Tier3Provider, text: str, tool_name: str) -> Any:
+        ctx = {"toolName": tool_name}
+        result = provider.classify(text, ctx=ctx)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    @staticmethod
+    def _tier1_metadata(sanitized) -> tuple[list[str], list[str], dict]:
+        prm = sanitized.metadata.patterns_removed_by_field
+        mbf = sanitized.metadata.methods_by_field
+        detections = list(dict.fromkeys(p for patterns in prm.values() for p in patterns))
+        active_methods = {"role_stripping", "pattern_removal", "encoding_detection"}
+        fields_sanitized = [
+            field_name for field_name, methods in mbf.items()
+            if any(m in active_methods for m in methods)
+        ]
+        return detections, fields_sanitized, prm
+
+    async def _maybe_tier3_cascade(
+        self,
+        tier2: _Tier2Outcome,
+        tool_name: str,
+    ) -> tuple[Tier3Result | None, bool | None]:
+        """Run Tier 3 cascade escalation when Tier 2 score is in the gray band."""
+        if not (self._tier3_enabled and self._defender_mode == "cascade"):
+            return None, None
+        eff = tier2.effective_score
+        if eff is None or not tier2.max_sentence:
+            return None, None
+        if eff < self._tier3_band.lower or eff >= self._tier3_band.upper:
+            return None, None
+
+        provider = self._resolve_tier3_provider()
+        if provider is None:
+            if not self._tier3_missing_provider_warned:
+                self._tier3_missing_provider_warned = True
+                _logger.warning(
+                    "[defender] enable_tier3=true but no Tier 3 provider is registered. "
+                    "Cascade will skip Tier 3 escalation. Call set_default_tier3_provider() at app startup."
+                )
+            return Tier3Skip(skip_reason="No Tier 3 provider registered"), None
+
+        max_sentence = tier2.max_sentence
+        bounded = (
+            max_sentence[: self._tier3_max_text_length]
+            if len(max_sentence) > self._tier3_max_text_length
+            else max_sentence
+        )
+        try:
+            raw = await self._invoke_tier3_classify(provider, bounded, tool_name)
+            validated = self._validate_tier3_verdict(raw)
+            if isinstance(validated, Tier3Skip):
+                return validated, None
+            return validated, validated.decision == "block"
+        except Exception as e:
+            return Tier3Skip(skip_reason=f"Tier 3 provider error: {e}"), None
+
+    @staticmethod
+    def _finalize_allowed_and_risk(
+        *,
+        detections: list[str],
+        fields_sanitized: list[str],
+        tier2_has_threat: bool,
+        tier2_idx: int,
+        tier1_idx: int,
+        risk_level: RiskLevel,
+        block_high_risk: bool,
+        tier3_override_block: bool | None,
+    ) -> tuple[RiskLevel, bool]:
+        tier3_overrode_to_allow = tier3_override_block is False
+        tier3_overrode_to_block = tier3_override_block is True
+
+        if tier3_overrode_to_block and _RISK_LEVELS.index(risk_level) < _RISK_LEVELS.index("high"):
+            risk_level = "high"
+        elif tier3_overrode_to_allow and tier2_idx > tier1_idx:
+            risk_level = _RISK_LEVELS[tier1_idx]
+
+        has_threats = (
+            bool(detections)
+            or bool(fields_sanitized)
+            or (tier2_has_threat and not tier3_overrode_to_allow)
+            or tier3_overrode_to_block
+        )
+        allowed = (
+            not block_high_risk
+            or not has_threats
+            or risk_level not in ("high", "critical")
+        )
+        return risk_level, allowed
+
+    async def _run_tier3_only(
+        self,
+        value: Any,
+        provider: Tier3Provider,
+        tool_name: str,
+        depth_flag: dict[str, bool],
+        start_time: float,
+    ) -> DefenseResult:
+        strings = [s for s in _extract_strings(value, None, depth_flag) if len(s) > 0]
+        bounded = _bounded_join_strings(strings, self._tier3_max_text_length)
+
+        verdict: Tier3Verdict | None = None
+        skip_reason: str | None = None
+        if len(bounded) == 0:
+            skip_reason = "No strings extracted from tool result"
+        else:
+            try:
+                raw = await self._invoke_tier3_classify(provider, bounded, tool_name)
+                validated = self._validate_tier3_verdict(raw)
+                if isinstance(validated, Tier3Skip):
+                    skip_reason = validated.skip_reason
+                else:
+                    verdict = validated
+            except Exception as e:
+                skip_reason = f"Tier 3 provider error: {e}"
+
+        sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name)
+        detections, fields_sanitized, prm = self._tier1_metadata(sanitized)
+
+        blocked = verdict is not None and verdict.decision == "block"
+        risk_level: RiskLevel = "high" if blocked else "low"
+        allowed = not self._config.block_high_risk or not blocked
+        tier3_result: Tier3Result = (
+            verdict if verdict is not None else Tier3Skip(skip_reason=skip_reason or "Tier 3 skipped")
+        )
+
+        return DefenseResult(
+            allowed=allowed,
+            risk_level=risk_level,
+            sanitized=sanitized.sanitized,
+            detections=detections,
+            fields_sanitized=fields_sanitized,
+            patterns_by_field=prm,
+            tier3=tier3_result,
+            fields_dropped=[],
+            truncated_at_depth=depth_flag["hit"] or None,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+        )
+
     def defend_tool_result(self, value: Any, tool_name: str) -> DefenseResult:
-        """Defend a tool result using Tier 1 and optionally Tier 2 classification.
+        """Defend a tool result using Tier 1 and optionally Tier 2 / Tier 3 classification.
 
         When SFE is enabled, ``fields_dropped`` lists paths excluded from **Tier 2**
         string extraction only; the returned ``sanitized`` payload is still Tier 1 output
         from the **original** tool value (SFE does not remove fields from the returned object).
+
+        When ``enable_tier3`` is on, this delegates to :meth:`defend_tool_result_async`
+        via ``asyncio.run``. Call that method directly from async code (e.g. FastAPI).
         """
+        if self._tier3_enabled:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self.defend_tool_result_async(value, tool_name))
+            raise RuntimeError(
+                "defend_tool_result() cannot call Tier 3 from a running event loop; "
+                "use: await defense.defend_tool_result_async(value, tool_name)"
+            )
+        return self._defend_tool_result_sync(value, tool_name)
+
+    async def defend_tool_result_async(self, value: Any, tool_name: str) -> DefenseResult:
+        """Async defense path — required when Tier 3 is enabled inside a running event loop."""
         start_time = time.perf_counter()
         depth_flag = {"hit": False}
+
+        if self._tier3_enabled and self._defender_mode == "tier3_only":
+            provider = self._resolve_tier3_provider()
+            if provider is not None:
+                return await self._run_tier3_only(value, provider, tool_name, depth_flag, start_time)
+            if not self._tier3_missing_provider_warned:
+                self._tier3_missing_provider_warned = True
+                _logger.warning(
+                    "[defender] defender_mode=tier3_only but no Tier 3 provider is registered. "
+                    "Falling back to Tier 1 + Tier 2. Call set_default_tier3_provider() at app startup."
+                )
+
+        return await self._defend_tool_result_async_impl(
+            value, tool_name, start_time=start_time, depth_flag=depth_flag
+        )
+
+    async def _defend_tool_result_async_impl(
+        self,
+        value: Any,
+        tool_name: str,
+        *,
+        start_time: float,
+        depth_flag: dict[str, bool],
+    ) -> DefenseResult:
+        sfe_filtered_value: Any = value
+        fields_dropped: list[str] = []
+        if self._sfe_enabled:
+            try:
+                predictor = self._sfe_custom_predictor or get_default_predictor()
+                if predictor is not None:
+                    pre = sfe_preprocess(value, {"predictor": predictor, "threshold": self._sfe_threshold})
+                    sfe_filtered_value = pre.filtered
+                    fields_dropped = pre.dropped
+                    if pre.truncated_at_depth:
+                        depth_flag["hit"] = True
+            except Exception as e:
+                _logger.warning(
+                    "[defender] SFE preprocessing failed; continuing without filtering. Reason: %s",
+                    e,
+                )
+
+        sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name)
+        detections, fields_sanitized, prm = self._tier1_metadata(sanitized)
+
+        tier2 = (
+            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag)
+            if self._tier2 is not None
+            else _Tier2Outcome()
+        )
+
+        tier3_result, tier3_override_block = await self._maybe_tier3_cascade(tier2, tool_name)
+
+        tier1_idx = _RISK_LEVELS.index(sanitized.metadata.overall_risk_level)
+        tier2_idx = _RISK_LEVELS.index(tier2.risk)
+        risk_level = _RISK_LEVELS[max(tier1_idx, tier2_idx)]
+
+        if tier2.multihead_blocked is True:
+            tier2_has_threat = True
+        elif tier2.multihead_blocked is False:
+            tier2_has_threat = False
+        else:
+            tier2_has_threat = (
+                tier2.effective_score is not None
+                and tier2.effective_score >= self._config.tier2.high_risk_threshold
+            )
+
+        risk_level, allowed = self._finalize_allowed_and_risk(
+            detections=detections,
+            fields_sanitized=fields_sanitized,
+            tier2_has_threat=tier2_has_threat,
+            tier2_idx=tier2_idx,
+            tier1_idx=tier1_idx,
+            risk_level=risk_level,
+            block_high_risk=self._config.block_high_risk,
+            tier3_override_block=tier3_override_block,
+        )
+
+        return DefenseResult(
+            allowed=allowed,
+            risk_level=risk_level,
+            sanitized=sanitized.sanitized,
+            detections=detections,
+            fields_sanitized=fields_sanitized,
+            patterns_by_field=prm,
+            tier2_score=tier2.effective_score,
+            tier2_raw_score=tier2.raw_score,
+            tier2_aux_score=tier2.aux_score,
+            tier2_multihead_blocked=tier2.multihead_blocked,
+            tier2_skip_reason=tier2.skip_reason,
+            max_sentence=tier2.max_sentence,
+            tier3=tier3_result,
+            fields_dropped=fields_dropped,
+            truncated_at_depth=depth_flag["hit"] or None,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+        )
+
+    def _defend_tool_result_sync(
+        self,
+        value: Any,
+        tool_name: str,
+        *,
+        start_time: float | None = None,
+        depth_flag: dict[str, bool] | None = None,
+    ) -> DefenseResult:
+        if start_time is None:
+            start_time = time.perf_counter()
+        if depth_flag is None:
+            depth_flag = {"hit": False}
 
         sfe_filtered_value: Any = value
         fields_dropped: list[str] = []
@@ -275,25 +661,17 @@ class PromptDefense:
 
         # Threat signals: Tier 1 detections, Tier 1 sanitization methods, or
         # Tier 2 above-threshold (subject to multi-head veto).
-        has_threats = bool(detections) or bool(fields_sanitized) or tier2_has_threat
-
-        # Three cases for ``allowed``:
-        # 1. ``block_high_risk`` is off -> always allow.
-        # 2. No threat signals found -> allow (base risk from tool rules
-        #    alone does not block).
-        # 3. Risk did not reach high/critical -> allow.
-        allowed = (
-            not self._config.block_high_risk
-            or not has_threats
-            or risk_level not in ("high", "critical")
+        risk_level, allowed = self._finalize_allowed_and_risk(
+            detections=detections,
+            fields_sanitized=fields_sanitized,
+            tier2_has_threat=tier2_has_threat,
+            tier2_idx=tier2_idx,
+            tier1_idx=tier1_idx,
+            risk_level=risk_level,
+            block_high_risk=self._config.block_high_risk,
+            tier3_override_block=None,
         )
 
-        # ``tier2_score`` reports the effective score -- the value that
-        # drove the block decision. The multi-head aux veto path sets it
-        # to ``0.0`` (not ``None``), keeping the triple coherent:
-        # tier2_score=0 / risk_level low / allowed=true.
-        # ``tier2_raw_score`` is the pre-density / pre-rule max-chunk main
-        # score for forensics -- never use it to make decisions.
         return DefenseResult(
             allowed=allowed,
             risk_level=risk_level,
@@ -578,8 +956,36 @@ class PromptDefense:
         out.risk = tier2.get_risk_level(out.effective_score)
 
     def defend_tool_results(self, items: list[dict[str, Any]]) -> list[DefenseResult]:
-        """Defend multiple tool results."""
+        """Defend multiple tool results (sequential when Tier 3 is off).
+
+        When ``enable_tier3`` is on, delegates to :meth:`defend_tool_results_async`
+        via ``asyncio.run`` (parallel per item, matching npm ``defendToolResults``).
+        Use the async method directly inside a running event loop.
+        """
+        if self._tier3_enabled:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self.defend_tool_results_async(items))
+            raise RuntimeError(
+                "defend_tool_results() cannot call Tier 3 from a running event loop; "
+                "use: await defense.defend_tool_results_async(items)"
+            )
         return [self.defend_tool_result(item["value"], item["tool_name"]) for item in items]
+
+    async def defend_tool_results_async(self, items: list[dict[str, Any]]) -> list[DefenseResult]:
+        """Defend multiple tool results concurrently (npm ``defendToolResults`` parity).
+
+        Runs :meth:`defend_tool_result_async` per item in parallel via ``asyncio.gather``.
+        Result order matches ``items``.
+        """
+        if not items:
+            return []
+        return list(
+            await asyncio.gather(
+                *(self.defend_tool_result_async(item["value"], item["tool_name"]) for item in items)
+            )
+        )
 
     def analyze(self, text: str) -> Tier1Result:
         """Analyze text for injection patterns (Tier 1 only)."""
