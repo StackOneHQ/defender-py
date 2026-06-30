@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.2](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.7.1...stackone-defender-v0.7.2) (2026-06-30)
+
+
+### Features
+
+* add Tier3Verdict.usage for TS 0.7.2 parity ([2e18269](https://github.com/StackOneHQ/stackone-defender/commit/2e182695c20e9b087041e55f7466cca9b659521a))
+* Tier3Verdict.usage parity with @stackone/defender 0.7.2 ([1c9c0c8](https://github.com/StackOneHQ/stackone-defender/commit/1c9c0c8026fd8c4dda2f78c31a1f500c01045d43))
+
 ## [0.7.1](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.7.0...stackone-defender-v0.7.1) (2026-06-16)
 
 
