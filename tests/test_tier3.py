@@ -12,7 +12,6 @@ from stackone_defender import (
     get_default_tier3_provider,
     set_default_tier3_provider,
 )
-from stackone_defender.core.prompt_defense import PromptDefense
 from stackone_defender.types import Tier3Skip, Tier3TokenUsage, Tier3Verdict
 
 
@@ -413,9 +412,10 @@ class TestTier3UsagePropagation:
         )
         assert result.tier3.latency_ms == 42
 
-    def test_validate_tier3_verdict_parses_snake_case_usage(self):
-        validated = PromptDefense._validate_tier3_verdict(
-            {
+    def test_passes_snake_case_usage_through_public_api(self):
+        provider = MagicMock()
+        provider.classify = AsyncMock(
+            return_value={
                 "decision": "allow",
                 "usage": {
                     "prompt_tokens": 10,
@@ -424,16 +424,36 @@ class TestTier3UsagePropagation:
                 },
             }
         )
-        assert isinstance(validated, Tier3Verdict)
-        assert validated.usage == Tier3TokenUsage(
+        defense = create_prompt_defense(
+            enable_tier1=False,
+            enable_tier2=False,
+            enable_tier3=True,
+            defender_mode="tier3_only",
+            tier3={"provider": provider},
+        )
+
+        result = asyncio.run(defense.defend_tool_result_async({"body": "test"}, "test_tool"))
+
+        assert isinstance(result.tier3, Tier3Verdict)
+        assert result.tier3.usage == Tier3TokenUsage(
             prompt_tokens=10,
             completion_tokens=5,
             total_tokens=15,
         )
 
-    def test_validate_tier3_verdict_preserves_usage_on_dataclass_instance(self):
-        verdict = Tier3Verdict(
-            decision="allow",
-            usage=Tier3TokenUsage(prompt_tokens=1, completion_tokens=2, total_tokens=3),
+    def test_preserves_usage_when_provider_returns_tier3_verdict_instance(self):
+        usage = Tier3TokenUsage(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+        provider = MagicMock()
+        provider.classify = AsyncMock(return_value=Tier3Verdict(decision="allow", usage=usage))
+        defense = create_prompt_defense(
+            enable_tier1=False,
+            enable_tier2=False,
+            enable_tier3=True,
+            defender_mode="tier3_only",
+            tier3={"provider": provider},
         )
-        assert PromptDefense._validate_tier3_verdict(verdict) is verdict
+
+        result = asyncio.run(defense.defend_tool_result_async({"body": "test"}, "test_tool"))
+
+        assert isinstance(result.tier3, Tier3Verdict)
+        assert result.tier3.usage == usage

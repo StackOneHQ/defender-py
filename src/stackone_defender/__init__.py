@@ -29,6 +29,7 @@ from .types import (
     RiskLevel,
     Tier1Result,
     Tier3Provider,
+    Tier3TokenUsage,
     Tier3Verdict,
 )
 from .utils.boundary import contains_boundary_patterns, generate_boundary_instructions
@@ -44,6 +45,7 @@ __all__ = [
     "SfePreprocessResult",
     "Tier1Result",
     "Tier3Provider",
+    "Tier3TokenUsage",
     "Tier3Verdict",
     "contains_boundary_patterns",
     "create_prompt_defense",
