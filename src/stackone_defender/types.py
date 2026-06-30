@@ -66,6 +66,15 @@ class Tier1Result:
 
 
 @dataclass
+class Tier3TokenUsage:
+    """Token usage reported by a Tier 3 provider (e.g. vLLM or OpenAI ``usage``)."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+@dataclass
 class Tier3Verdict:
     """Authoritative block/allow decision from a Tier 3 provider."""
 
@@ -73,6 +82,7 @@ class Tier3Verdict:
     score: float | None = None
     raw: Any = None
     latency_ms: float | None = None
+    usage: Tier3TokenUsage | None = None
 
 
 @dataclass

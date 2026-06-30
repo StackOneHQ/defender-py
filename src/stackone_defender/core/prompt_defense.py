@@ -30,6 +30,7 @@ from ..types import (
     Tier3Provider,
     Tier3Result,
     Tier3Skip,
+    Tier3TokenUsage,
     Tier3Verdict,
 )
 from .tool_result_sanitizer import ToolResultSanitizer, create_tool_result_sanitizer
@@ -293,6 +294,21 @@ class PromptDefense:
         return self._tier3_custom_provider or get_default_tier3_provider()
 
     @staticmethod
+    def _parse_tier3_usage(usage: Any) -> Tier3TokenUsage | None:
+        if usage is None or not isinstance(usage, dict):
+            return None
+        prompt_tokens = usage.get("prompt_tokens", usage.get("promptTokens"))
+        completion_tokens = usage.get("completion_tokens", usage.get("completionTokens"))
+        total_tokens = usage.get("total_tokens", usage.get("totalTokens"))
+        if not all(isinstance(value, int) for value in (prompt_tokens, completion_tokens, total_tokens)):
+            return None
+        return Tier3TokenUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+
+    @staticmethod
     def _validate_tier3_verdict(verdict: Any) -> Tier3Verdict | Tier3Skip:
         if isinstance(verdict, Tier3Verdict):
             if verdict.decision in ("block", "allow"):
@@ -317,6 +333,7 @@ class PromptDefense:
             score=verdict.get("score"),
             raw=verdict.get("raw"),
             latency_ms=verdict.get("latency_ms", verdict.get("latencyMs")),
+            usage=PromptDefense._parse_tier3_usage(verdict.get("usage")),
         )
 
     @staticmethod
