@@ -1,7 +1,5 @@
 """Tests for utility functions."""
 
-
-
 from stackone_defender.config import DEFAULT_RISKY_FIELDS
 from stackone_defender.utils.boundary import (
     contains_boundary_patterns,
