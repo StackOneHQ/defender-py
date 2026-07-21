@@ -105,7 +105,10 @@ def _detect_base64(text: str, min_length: int) -> list[EncodingDetection]:
         if len(candidate) < min_length:
             continue
         try:
-            decoded_bytes = base64.b64decode(candidate, validate=False)
+            # Pad to a multiple of 4; b64decode rejects unpadded input, which
+            # the except below would silently drop (JS atob tolerates it).
+            padded = candidate + "=" * (-len(candidate) % 4)
+            decoded_bytes = base64.b64decode(padded, validate=False)
             try:
                 decoded = decoded_bytes.decode("ascii")
             except UnicodeDecodeError:

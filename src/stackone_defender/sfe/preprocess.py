@@ -196,8 +196,9 @@ def _filter_by_paths(
         return obj
 
     if isinstance(obj, list):
-        # Match _extract_fields: list traversal does not increment logical depth.
-        return [_filter_by_paths(item, drop_paths, depth_flag, path, depth) for item in obj]
+        # depth+1 on lists so the cap bounds deep nesting (matches TS); here
+        # depth only gates the cap, not path construction.
+        return [_filter_by_paths(item, drop_paths, depth_flag, path, depth + 1) for item in obj]
 
     if isinstance(obj, dict):
         out: dict[str, Any] = {}
@@ -217,7 +218,8 @@ def _compact_dropped(obj: Any, depth_flag: dict[str, bool], depth: int = 0) -> A
         return obj
 
     if isinstance(obj, list):
-        return [_compact_dropped(item, depth_flag, depth) for item in obj if item is not _DROPPED]
+        # depth+1 on lists so the cap bounds deep nesting (matches TS).
+        return [_compact_dropped(item, depth_flag, depth + 1) for item in obj if item is not _DROPPED]
 
     if isinstance(obj, dict):
         out: dict[str, Any] = {}

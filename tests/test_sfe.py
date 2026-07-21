@@ -42,3 +42,20 @@ def test_prompt_defense_use_sfe_reports_fields_dropped_but_keeps_tier1_payload()
     assert "uuid" in result.fields_dropped
     assert result.sanitized["uuid"] == "abc-123"
     assert result.sanitized["description"] == "Hello"
+
+
+def test_deep_list_nesting_does_not_recursion_error():
+    """Regression (ENG-1296): _filter_by_paths / _compact_dropped recursed into
+    lists without advancing depth, so hostile pure-list nesting overflowed the
+    stack (RecursionError) instead of hitting the traversal cap.
+    """
+    deep = "x"
+    for _ in range(1500):  # well past MAX_TRAVERSAL_DEPTH (100) and the stack limit
+        deep = [deep]
+    payload = {"uuid": "abc-123", "deep": deep}
+
+    # Must not raise: the depth cap fires on the deep list rather than recursing.
+    result = sfe_preprocess(payload, {"predictor": _MockPredictor(), "threshold": 0.5})
+
+    assert "uuid" in result.dropped
+    assert result.truncated_at_depth
