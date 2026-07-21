@@ -1,6 +1,5 @@
 """Tests for sanitizer modules."""
 
-import pytest
 
 from stackone_defender.sanitizers.encoding_detector import (
     contains_encoded_content,

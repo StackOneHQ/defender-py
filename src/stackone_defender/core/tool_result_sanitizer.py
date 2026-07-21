@@ -22,7 +22,6 @@ from ..types import (
     SanitizationContext,
     SanitizationMetadata,
     SanitizationResult,
-    SizeMetrics,
     TraversalConfig,
 )
 from ..utils.boundary import generate_data_boundary
