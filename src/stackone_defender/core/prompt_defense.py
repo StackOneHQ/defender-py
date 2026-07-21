@@ -11,7 +11,7 @@ import inspect
 import logging
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..classifiers.pattern_detector import PatternDetector, create_pattern_detector
@@ -242,6 +242,8 @@ class PromptDefense:
         self._tier3_band = _DEFAULT_TIER3_BAND
         self._tier3_max_text_length = _DEFAULT_TIER3_MAX_TEXT_LENGTH
         self._tier3_missing_provider_warned = False
+        self._tier3_block_threshold: float | None = None
+        self._tier3_missing_score_warned = False
         tier3_opts = tier3 or {}
         if tier3_opts.get("provider") is not None:
             self._tier3_custom_provider = tier3_opts["provider"]
@@ -274,6 +276,21 @@ class PromptDefense:
                     "must satisfy 0 <= lower < upper <= 1. Falling back to default { lower: 0.3, upper: 0.85 }.",
                     lower,
                     upper,
+                )
+        block_threshold = tier3_opts.get("block_threshold", tier3_opts.get("blockThreshold"))
+        if block_threshold is not None:
+            if (
+                isinstance(block_threshold, (int, float))
+                and not isinstance(block_threshold, bool)
+                and math.isfinite(block_threshold)
+                and 0 <= block_threshold <= 1
+            ):
+                self._tier3_block_threshold = float(block_threshold)
+            else:
+                _logger.warning(
+                    "[defender] invalid tier3.block_threshold %s — must be a finite number in [0, 1]. "
+                    "Falling back to the provider's decision.",
+                    block_threshold,
                 )
 
     def warmup_tier2(self) -> None:
@@ -309,10 +326,21 @@ class PromptDefense:
         )
 
     @staticmethod
+    def _normalize_tier3_score(score: Any) -> float | None:
+        # Public contract is score in [0, 1]; drop anything else (wrong type,
+        # non-finite, out of range) rather than leak it to consumers or the
+        # block gate. bool is excluded since it is not a numeric score.
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            return None
+        if not math.isfinite(score) or score < 0 or score > 1:
+            return None
+        return float(score)
+
+    @staticmethod
     def _validate_tier3_verdict(verdict: Any) -> Tier3Verdict | Tier3Skip:
         if isinstance(verdict, Tier3Verdict):
             if verdict.decision in ("block", "allow"):
-                return verdict
+                return replace(verdict, score=PromptDefense._normalize_tier3_score(verdict.score))
             return Tier3Skip(
                 skip_reason=(
                     f'Tier 3 provider returned invalid decision: {verdict.decision!r} '
@@ -330,11 +358,36 @@ class PromptDefense:
             )
         return Tier3Verdict(
             decision=decision,
-            score=verdict.get("score"),
+            score=PromptDefense._normalize_tier3_score(verdict.get("score")),
             raw=verdict.get("raw"),
             latency_ms=verdict.get("latency_ms", verdict.get("latencyMs")),
             usage=PromptDefense._parse_tier3_usage(verdict.get("usage")),
         )
+
+    def _is_tier3_block(self, verdict: Tier3Verdict) -> bool:
+        """Resolve a validated verdict to block/allow.
+
+        With ``block_threshold`` unset this is the model's ``decision`` (its
+        argmax, an implicit 0.5 cut). With a threshold set we decide on ``score``
+        (P(block)) instead, which is what makes any other operating point
+        reachable. A threshold with no usable score falls back to ``decision``
+        (warned once) rather than taking the tier offline.
+        """
+        if self._tier3_block_threshold is None:
+            return verdict.decision == "block"
+        # Validation already dropped any score outside [0, 1], so a non-None
+        # score here is usable as P(block).
+        if verdict.score is not None:
+            return verdict.score >= self._tier3_block_threshold
+        if not self._tier3_missing_score_warned:
+            self._tier3_missing_score_warned = True
+            _logger.warning(
+                "[defender] tier3.block_threshold=%s is set but the provider did not report a usable "
+                "score (missing, or not a number in [0, 1]). Falling back to the provider's decision — "
+                "the threshold is not being applied.",
+                self._tier3_block_threshold,
+            )
+        return verdict.decision == "block"
 
     @staticmethod
     async def _invoke_tier3_classify(provider: Tier3Provider, text: str, tool_name: str) -> Any:
@@ -391,7 +444,7 @@ class PromptDefense:
             validated = self._validate_tier3_verdict(raw)
             if isinstance(validated, Tier3Skip):
                 return validated, None
-            return validated, validated.decision == "block"
+            return validated, self._is_tier3_block(validated)
         except Exception as e:
             return Tier3Skip(skip_reason=f"Tier 3 provider error: {e}"), None
 
@@ -457,7 +510,7 @@ class PromptDefense:
         sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name)
         detections, fields_sanitized, prm = self._tier1_metadata(sanitized)
 
-        blocked = verdict is not None and verdict.decision == "block"
+        blocked = verdict is not None and self._is_tier3_block(verdict)
         risk_level: RiskLevel = "high" if blocked else "low"
         allowed = not self._config.block_high_risk or not blocked
         tier3_result: Tier3Result = (

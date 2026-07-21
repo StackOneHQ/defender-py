@@ -76,9 +76,16 @@ class Tier3TokenUsage:
 
 @dataclass
 class Tier3Verdict:
-    """Authoritative block/allow decision from a Tier 3 provider."""
+    """Block/allow verdict from a Tier 3 provider.
+
+    ``decision`` is authoritative unless ``tier3.block_threshold`` is set, in
+    which case the defender decides by ``score >= block_threshold`` and only
+    falls back to ``decision`` when ``score`` is absent or out of range.
+    """
 
     decision: Tier3Decision
+    # P(block) in [0, 1] when the provider can report it. Forensics-only until
+    # tier3.block_threshold is set, at which point it drives the decision.
     score: float | None = None
     raw: Any = None
     latency_ms: float | None = None
