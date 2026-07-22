@@ -1,9 +1,6 @@
 """Tests for utility functions."""
 
-import re
-
-import pytest
-
+from stackone_defender.config import DEFAULT_RISKY_FIELDS
 from stackone_defender.utils.boundary import (
     contains_boundary_patterns,
     generate_data_boundary,
@@ -22,7 +19,6 @@ from stackone_defender.utils.structure import (
     is_paginated_response,
     is_plain_object,
 )
-from stackone_defender.config import DEFAULT_RISKY_FIELDS
 
 
 class TestBoundary:

@@ -12,7 +12,7 @@ from ..config import DANGEROUS_KEYS, MAX_TRAVERSAL_DEPTH
 
 _logger = logging.getLogger(__name__)
 
-_predictor_cache: dict[str, "SfePredictor"] = {}
+_predictor_cache: dict[str, SfePredictor] = {}
 _predictor_lock = Lock()
 _DROPPED = object()
 

@@ -1,6 +1,12 @@
 """Sanitizers for prompt injection mitigation."""
 
-from .encoding_detector import contains_encoded_content, contains_suspicious_encoding, decode_all_encoding, detect_encoding, redact_all_encoding
+from .encoding_detector import (
+    contains_encoded_content,
+    contains_suspicious_encoding,
+    decode_all_encoding,
+    detect_encoding,
+    redact_all_encoding,
+)
 from .normalizer import analyze_suspicious_unicode, contains_suspicious_unicode, normalize_unicode
 from .pattern_remover import remove_patterns
 from .role_stripper import contains_role_markers, strip_role_markers

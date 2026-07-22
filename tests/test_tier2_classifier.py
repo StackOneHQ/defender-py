@@ -1,10 +1,7 @@
 """Tests for Tier 2 classifier configuration and behavior."""
 
 import json
-import os
 from pathlib import Path
-
-import pytest
 
 from stackone_defender.classifiers import tier2_classifier as t2_mod
 from stackone_defender.classifiers.tier2_classifier import Tier2Classifier, create_tier2_classifier

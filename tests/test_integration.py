@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from stackone_defender.core.tool_result_sanitizer import ToolResultSanitizer, sanitize_tool_result
 from stackone_defender.core.prompt_defense import create_prompt_defense
+from stackone_defender.core.tool_result_sanitizer import ToolResultSanitizer, sanitize_tool_result
 
 
 class TestToolResultSanitizer:

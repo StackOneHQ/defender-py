@@ -2,12 +2,9 @@
 
 import re
 
-import pytest
-
 from stackone_defender.classifiers.pattern_detector import PatternDetector, create_pattern_detector
 from stackone_defender.classifiers.patterns import (
     ALL_PATTERNS,
-    FAST_FILTER_KEYWORDS,
     contains_filter_keywords,
 )
 from stackone_defender.types import PatternDefinition
