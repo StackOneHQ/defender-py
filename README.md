@@ -120,6 +120,47 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 | jayavibhav (adversarial) | 0.9717 | ~1k |
 | **Average** | **0.9079** | ~25k |
 
+### Optional Tier 3 — LLM adjudication (consumer-supplied)
+
+Authoritative LLM-based classification for the cases Tier 2 finds ambiguous. The package ships **only** the orchestration and the `Tier3Provider` interface — the actual model endpoint (a hosted LLM, OpenAI, an internal inference service) lives in your code, keeping proprietary models and credentials out of the package.
+
+Two modes, selected via `defender_mode`:
+- **`"cascade"`** (default): Tier 1 → Tier 2 → Tier 3, with Tier 3 invoked only when the Tier 2 effective score falls in the gray band (default `[0.3, 0.85)`). The Tier 3 verdict overrides Tier 2 on the escalated chunk — a `block` forces a block, an `allow` rescues it. Outside the band defender skips the round trip.
+- **`"tier3_only"`**: skip Tier 2; the block/allow decision is the Tier 3 verdict alone. Tier 1 still sanitizes the returned `sanitized` payload.
+
+Register a provider once at startup, then opt in per instance:
+
+```python
+from typing import Any
+
+from stackone_defender import create_prompt_defense, set_default_tier3_provider
+from stackone_defender.types import Tier3Verdict
+
+class MyProvider:
+    def classify(self, text: str, *, ctx: dict[str, Any] | None = None) -> Tier3Verdict:
+        # Call your LLM endpoint here (sync or awaitable). ctx["toolName"] is available.
+        verdict = call_my_llm(text, tool_name=(ctx or {}).get("toolName"))
+        return Tier3Verdict(decision="block" if verdict.block else "allow", score=verdict.p_block)
+
+set_default_tier3_provider(MyProvider())
+
+defense = create_prompt_defense(
+    block_high_risk=True,
+    enable_tier3=True,
+    defender_mode="cascade",  # or "tier3_only"
+    tier3={
+        "provider": MyProvider(),                          # optional: overrides the registry for this instance
+        "escalation_band": {"lower": 0.3, "upper": 0.85},  # cascade gray band; [lower, upper), defaults shown
+        "max_text_length": 10000,                          # caps text passed to the provider
+        "block_threshold": 0.622,                          # optional; decide on score, not the model's word
+    },
+)
+```
+
+**Choosing the operating point (`block_threshold`).** By default the model's `decision` word is authoritative — but that word is its argmax, an implicit 0.5 cut that moves on its own whenever the model is retrained. Set `tier3.block_threshold` to decide on `verdict.score` (P(block)) instead: the cut becomes an explicit config value — raise it to trade recall for fewer false positives, lower it for the reverse; `0.5` reproduces argmax. It requires a provider that reports `score` as P(block) (not "confidence in whichever decision I made" — those invert on allows). If `score` is missing or outside `[0, 1]` the verdict's `decision` is used instead and defender warns once, so a provider that cannot report a score degrades to the default rather than failing.
+
+**Fail-open semantics.** A provider error or timeout records a `skip_reason` on `result.tier3`; in cascade defender falls back to the Tier 2 decision, in `tier3_only` it allows the request. `enable_tier3=True` with no registered provider falls back to the standard Tier 1 + Tier 2 cascade and logs one warning per instance — Tier 3 misconfiguration never silently disables defense. `result.tier3` carries the verdict (a `Tier3Verdict`, or a `Tier3Skip` when the provider ran but returned nothing usable) when Tier 3 runs, and is `None` when it doesn't.
+
 ### `allowed` vs `risk_level`
 
 - Use **`allowed`** for gating when `block_high_risk=True`: `False` means do not pass `sanitized` to the model as-is.

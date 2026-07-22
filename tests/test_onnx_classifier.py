@@ -276,3 +276,60 @@ class TestGetDefaultModelPath:
 
         path = get_default_model_path()
         assert path.endswith(os.path.join("models", "minilm-multihead-v5"))
+
+
+def _bundled_model_path() -> str:
+    from stackone_defender.classifiers.onnx_classifier import get_default_model_path
+
+    return get_default_model_path()
+
+
+_BUNDLED_MODEL_PATH = _bundled_model_path()
+_HAS_BUNDLED_MODEL = os.path.exists(os.path.join(_BUNDLED_MODEL_PATH, "model_quantized.onnx"))
+try:
+    import onnxruntime as _ort  # noqa: F401
+
+    _HAS_ONNXRUNTIME = True
+except Exception:
+    _HAS_ONNXRUNTIME = False
+
+
+class TestCountTokensUntruncated:
+    """Regression (ENG-1296): count_tokens must report true length, not a value
+    capped at max_length by the inference tokenizer. When capped, the chunker
+    treats every long payload as one chunk and the tail (where an injection
+    hides) is dropped before the model sees it.
+    """
+
+    def test_count_tokens_reads_the_non_truncating_tokenizer(self):
+        # Wiring: count_tokens must read _count_tokenizer, not _tokenizer.
+        class _Enc:
+            def __init__(self, n: int):
+                self.ids = list(range(n))
+
+        class _TruncTokenizer:  # mimics enable_truncation(256)
+            def encode(self, text: str):
+                return _Enc(min(len(text.split()), 256))
+
+        class _FullTokenizer:
+            def encode(self, text: str):
+                return _Enc(len(text.split()))
+
+        c = OnnxClassifier()
+        c._max_length = 256
+        c._session = object()
+        c._tokenizer = _TruncTokenizer()
+        c._count_tokenizer = _FullTokenizer()
+
+        assert c.count_tokens("word " * 1000) == 1000
+
+    @pytest.mark.skipif(
+        not (_HAS_BUNDLED_MODEL and _HAS_ONNXRUNTIME),
+        reason="bundled ONNX model or onnxruntime unavailable",
+    )
+    def test_count_tokens_real_tokenizer_not_capped(self):
+        # The bundled tokenizer.json bakes in truncation=256; count_tokens must
+        # still see true length. A mock can't catch this construction bug.
+        c = OnnxClassifier(_BUNDLED_MODEL_PATH)
+        c.load_model()
+        assert c.count_tokens("word " * 3000) > c.get_max_length()

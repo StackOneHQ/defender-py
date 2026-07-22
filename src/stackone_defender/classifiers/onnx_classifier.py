@@ -17,7 +17,9 @@ from typing import Literal
 _logger = logging.getLogger(__name__)
 
 # Shared across all OnnxClassifier instances (keyed by resolved model dir path).
-_session_cache: dict[str, tuple[object, object]] = {}
+# Tuple is (session, tokenizer, count_tokenizer); the count tokenizer is
+# non-truncating so count_tokens reports true length (see _load_model).
+_session_cache: dict[str, tuple[object, object, object]] = {}
 _registry_lock = threading.Lock()
 _load_locks: dict[str, threading.Lock] = {}
 
@@ -64,6 +66,8 @@ class OnnxClassifier:
         self._model_path = model_path or get_default_model_path()
         self._session = None
         self._tokenizer = None
+        # Non-truncating tokenizer used only by count_tokens (see _load_model).
+        self._count_tokenizer = None
         self._max_length = 256
         self._load_failed = False
         # Output mode is detected lazily from the logits shape on the first
@@ -114,13 +118,13 @@ class OnnxClassifier:
         cache_key = str(Path(self._model_path).resolve())
         cached = _session_cache.get(cache_key)
         if cached:
-            self._session, self._tokenizer = cached
+            self._session, self._tokenizer, self._count_tokenizer = cached
             return
 
         with _lock_for_cache_key(cache_key):
             cached = _session_cache.get(cache_key)
             if cached:
-                self._session, self._tokenizer = cached
+                self._session, self._tokenizer, self._count_tokenizer = cached
                 return
 
             try:
@@ -140,13 +144,21 @@ class OnnxClassifier:
                 self._tokenizer.enable_truncation(max_length=self._max_length)
                 self._tokenizer.enable_padding(length=self._max_length)
 
+                # tokenizer.json bakes in truncation+padding, so disable both
+                # here to count true length rather than a value capped at
+                # max_length (which would make every long payload look like a
+                # single chunk and drop everything past the cap).
+                self._count_tokenizer = Tokenizer.from_file(tokenizer_path)
+                self._count_tokenizer.no_truncation()
+                self._count_tokenizer.no_padding()
+
                 onnx_path = str(Path(self._model_path) / "model_quantized.onnx")
                 self._session = ort.InferenceSession(onnx_path)
             except Exception as e:
                 _logger.warning("[defender] ONNX model failed to load: %s", e)
                 raise
 
-            _session_cache[cache_key] = (self._session, self._tokenizer)
+            _session_cache[cache_key] = (self._session, self._tokenizer, self._count_tokenizer)
 
     # ------------------------------------------------------------------
     # Inference
@@ -258,9 +270,9 @@ class OnnxClassifier:
 
     def count_tokens(self, text: str) -> int:
         self._ensure_loaded()
-        encoding = self._tokenizer.encode(text)
-        # Padding is enabled at a fixed length; count only real (attended) tokens.
-        return int(sum(encoding.attention_mask))
+        # Non-truncating count, including special tokens ([CLS]/[SEP]) to match
+        # the TS countTokens; the inference tokenizer would cap this at max_length.
+        return len(self._count_tokenizer.encode(text).ids)
 
     def get_max_length(self) -> int:
         return self._max_length
