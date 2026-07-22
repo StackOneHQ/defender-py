@@ -25,6 +25,8 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
         if: ${{ steps.release.outputs.pr || steps.release.outputs.release_created }}
+        with:
+          python-version: "3.12" # match ci.yaml so `uv lock` resolves deterministically
 
       # release-please bumps the version in pyproject.toml but not uv.lock, so
       # `uv sync --locked` (ci.yaml) fails on main once the release PR merges.
@@ -33,12 +35,15 @@ jobs:
         if: ${{ steps.release.outputs.pr }}
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
         run: |
           set -euo pipefail
-          branch="$(gh pr list --state open --json headRefName \
-            --jq '[.[] | select(.headRefName | startswith("release-please--"))][0].headRefName')"
+          # Resolve the exact PR release-please just opened/updated, rather than
+          # guessing by branch prefix (ambiguous if a stale release PR is open).
+          pr_number="$(echo "$RELEASE_PR" | jq -r '.number')"
+          branch="$(gh pr view "$pr_number" --json headRefName --jq '.headRefName')"
           if [ -z "$branch" ] || [ "$branch" = "null" ]; then
-            echo "No release-please branch found; nothing to sync." && exit 0
+            echo "Could not resolve release PR branch; nothing to sync." && exit 0
           fi
           git fetch origin "$branch"
           git checkout "$branch"
