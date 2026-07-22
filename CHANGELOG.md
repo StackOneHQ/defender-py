@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.3](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.7.2...stackone-defender-v0.7.3) (2026-07-22)
+
+
+### Features
+
+* **ENG-1279:** port Tier 3 score-threshold (decide on score, not the model's word) ([77c8a6a](https://github.com/StackOneHQ/defender-py/commit/77c8a6a38336ddd797f5691cedf4670f15f575fb))
+
+
+### Bug Fixes
+
+* **ENG-1279:** Tier 3 score threshold + ENG-1296 Tier 2/base64/SFE fixes ([3f2b9cd](https://github.com/StackOneHQ/defender-py/commit/3f2b9cd1f7dd82f19e468076bcb3196ad22bf83e))
+* **ENG-1296:** port TS parity fixes for Tier 2 truncation, base64, SFE recursion ([4fa8cda](https://github.com/StackOneHQ/defender-py/commit/4fa8cda445d8c08e30e74d6053e2eaf26026fed2))
+
 ## [0.7.2](https://github.com/StackOneHQ/stackone-defender/compare/stackone-defender-v0.7.1...stackone-defender-v0.7.2) (2026-06-30)
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "stackone-defender"
-version = "0.7.2"
+version = "0.7.3"
 description = "Indirect prompt injection defense for AI agents using tool calls"
 readme = "README.md"
 requires-python = ">=3.11"
