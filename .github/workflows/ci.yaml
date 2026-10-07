@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: warp-ubuntu-latest-x64-2x
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -21,7 +21,7 @@ jobs:
       - run: uv run ruff check .
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: warp-ubuntu-latest-x64-4x
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -34,7 +34,7 @@ jobs:
       - run: uv run pytest --cov=stackone_defender --cov-report=term-missing
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: warp-ubuntu-latest-x64-4x
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
