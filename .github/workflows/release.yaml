@@ -12,21 +12,22 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           config-file: .release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: ${{ steps.release.outputs.pr || steps.release.outputs.release_created }}
         with:
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         if: ${{ steps.release.outputs.pr || steps.release.outputs.release_created }}
         with:
           python-version: "3.12" # match ci.yaml so `uv lock` resolves deterministically
+          activate-environment: true
 
       # release-please bumps the version in pyproject.toml but not uv.lock, so
       # `uv sync --locked` (ci.yaml) fails on main once the release PR merges.
