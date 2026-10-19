@@ -8,12 +8,11 @@ from stackone_defender.classifiers import onnx_classifier as onnx_classifier_mod
 from stackone_defender.classifiers.onnx_classifier import BatchTokenStats, OnnxClassifier
 from stackone_defender.classifiers.tier2_classifier import Tier2Classifier
 
-# Skip ONNX tests if model files not present or on CI
-_MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "minilm-multihead-v5")
+# The bundled model ships in the package (src/stackone_defender/models/); skip only if it's missing.
+_MODEL_PATH = onnx_classifier_mod.get_default_model_path()
 _HAS_MODEL = os.path.exists(os.path.join(_MODEL_PATH, "model_quantized.onnx"))
-_ON_CI = os.environ.get("CI") == "true"
 
-skip_no_model = pytest.mark.skipif(not _HAS_MODEL or _ON_CI, reason="ONNX model files not available or CI")
+skip_no_model = pytest.mark.skipif(not _HAS_MODEL, reason="bundled ONNX model files not available")
 
 
 @skip_no_model
