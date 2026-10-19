@@ -345,8 +345,9 @@ def test_marker_ids_random_per_call_and_distinct_per_block():
         return [m[2] for m in MARKER_RE.finditer("\n".join(_attr(m, "content") for m in messages))]
 
     a, b = ids(), ids()
-    assert len(a) == 6  # 3 blocks × open/close
-    assert len(set(a)) == 3
+    for render in (a, b):
+        assert len(render) == 6  # 3 blocks × open/close
+        assert len(set(render)) == 3
     assert not set(a) & set(b)
 
 
