@@ -35,6 +35,13 @@ jobs:
       - run: uv sync --locked --group dev
       - run: uv run pytest --cov=stackone_defender --cov-report=term-missing
 
+  conformance-pin:
+    # tests/conformance/ must be an unmodified copy of the TS fixtures at the ref in VERSION.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash scripts/sync_conformance.sh --check
+
   build:
     runs-on: ubuntu-latest
     steps:
