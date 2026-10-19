@@ -20,11 +20,15 @@ from typing import Any
 
 import pytest
 
+import stackone_defender
 from stackone_defender import create_prompt_defense
 
 HERE = Path(__file__).parent
 FIXTURES = HERE / "conformance"
 KNOWN_FAILURES_FILE = HERE / "conformance_known_failures.txt"
+FIXTURE_FORMAT_VERSION = 1
+# A full commit SHA or a release tag. Branches would float; anything else isn't a TS ref.
+PIN_RE = re.compile(r"^([0-9a-f]{40}|defender-v\d+\.\d+\.\d+)$")
 
 # Fixture option names (TypeScript) → this package's names.
 _TIER3_OPTION_NAMES = {
@@ -40,6 +44,8 @@ _TIER3_OPTION_NAMES = {
     "stopOnFirstBlock": "stop_on_first_block",
     "includeRaw": "include_raw",
 }
+_NESTED_OPTION_NAMES = {"maxTier2Score": "max_tier2_score"}
+_CTX_NAMES = {"toolName": "tool_name", "userGoal": "user_goal", "toolDescription": "tool_description"}
 _TIER3_RESULT_FIELDS = {
     "decision": "decision",
     "score": "score",
@@ -88,7 +94,32 @@ def _attr(obj: Any, name: str) -> Any:
 
 
 def _tier3_options(opts: dict[str, Any] | None) -> dict[str, Any]:
-    return {_TIER3_OPTION_NAMES.get(k, k): v for k, v in (opts or {}).items()}
+    out = {}
+    for k, v in (opts or {}).items():
+        if isinstance(v, dict):
+            v = {_NESTED_OPTION_NAMES.get(nk, nk): nv for nk, nv in v.items()}
+        out[_TIER3_OPTION_NAMES.get(k, k)] = v
+    return out
+
+
+def _require(name: str) -> Any:
+    """The port's public function, or NotImplementedError when it doesn't exist yet."""
+    fn = getattr(stackone_defender, name, None)
+    if fn is None:
+        raise NotImplementedError(f"stackone_defender.{name} is not available yet")
+    return fn
+
+
+def _tier2_unavailable() -> str | None:
+    try:
+        import onnxruntime  # noqa: F401
+        import tokenizers  # noqa: F401
+    except ImportError:
+        return "onnxruntime/tokenizers not installed (install the [onnx] extra)"
+    model = Path(stackone_defender.get_default_model_path()) / "model_quantized.onnx"
+    if not model.exists():
+        return f"bundled Tier-2 model missing at {model}"
+    return None
 
 
 class _ScriptedJudge:
@@ -111,9 +142,10 @@ class _Recorder:
     def __init__(self) -> None:
         self.calls: list[tuple[int, str]] = []
 
-    def classify(self, text: str, *, ctx: dict[str, Any] | None = None) -> dict[str, Any]:
-        chunk = (ctx or {}).get("chunk") or {}
-        self.calls.append((chunk.get("index", len(self.calls)), text))
+    def classify(self, text: str, *, ctx: Any = None) -> dict[str, Any]:
+        chunk = _attr(ctx, "chunk")
+        index = _attr(chunk, "index") if chunk is not None else None
+        self.calls.append((index if index is not None else len(self.calls), text))
         return {"decision": "allow"}
 
 
@@ -123,7 +155,8 @@ def _pick_tier3(t3: Any) -> dict[str, Any] | None:
     out = {}
     for fixture_key, attr in _TIER3_RESULT_FIELDS.items():
         v = _attr(t3, attr)
-        if v is not None and v is not False:
+        # Absent and None mean "not set" (as `undefined` in TS); False is a real value.
+        if v is not None:
             out[fixture_key] = v
     raw = _attr(t3, "raw")
     out["hasRaw"] = raw is not None
@@ -152,16 +185,18 @@ def _serialize(inp: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prompt(inp: dict[str, Any]) -> dict[str, Any]:
-    try:
-        from stackone_defender import DEFAULT_TIER3_PROMPT, build_tier3_messages, create_llm_tier3_provider
-    except ImportError as e:  # not ported yet
-        raise NotImplementedError("build_tier3_messages is not available") from e
+    build_tier3_messages = _require("build_tier3_messages")
+    create_llm_tier3_provider = _require("create_llm_tier3_provider")
+    default_prompt = _require("DEFAULT_TIER3_PROMPT")
     prompt = inp.get("prompt")
+    ctx = {_CTX_NAMES.get(k, k): v for k, v in (inp.get("ctx") or {}).items()}
+    # Contract: a rejected template raises ValueError. Anything else is a real failure, so a
+    # broken port can't turn the "rejected" cases green by crashing.
     try:
         if prompt is not None:
             create_llm_tier3_provider(complete=lambda req: "", prompt=prompt)
-        messages = build_tier3_messages(prompt or DEFAULT_TIER3_PROMPT, inp["text"], inp.get("ctx") or {})
-    except Exception:
+        messages = build_tier3_messages(prompt or default_prompt, inp["text"], ctx)
+    except ValueError:
         return {"error": True}
     marker = re.compile(r"(<<<(?:END_)?[A-Z_]+ id=)[0-9a-f]{16}(>>>)")
     return {
@@ -172,13 +207,11 @@ def _prompt(inp: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse(inp: dict[str, Any]) -> dict[str, Any]:
-    try:
-        from stackone_defender import parse_verdict_json
-    except ImportError as e:  # not ported yet
-        raise NotImplementedError("parse_verdict_json is not available") from e
+    parse_verdict_json = _require("parse_verdict_json")
+    # Contract: an unusable reply raises ValueError; any other exception is a real failure.
     try:
         return _plain(parse_verdict_json(inp["reply"]))
-    except Exception:
+    except ValueError:
         return {"error": True}
 
 
@@ -207,7 +240,8 @@ def _policy(inp: dict[str, Any]) -> dict[str, Any]:
         tier3["decide"] = decide
     tier2 = inp.get("tier2") or {"enabled": False}
     tier2_config = {
-        k: tier2[c] for c, k in (("highRiskThreshold", "high_risk_threshold"), ("mediumRiskThreshold", "medium_risk_threshold"))
+        k: tier2[c]
+        for c, k in (("highRiskThreshold", "high_risk_threshold"), ("mediumRiskThreshold", "medium_risk_threshold"))
         if c in tier2
     }
     defense = create_prompt_defense(
@@ -243,6 +277,7 @@ ADAPTERS = {
 
 def _cases():
     known = _known_failures()
+    tier2_missing = _tier2_unavailable()
     seen: set[str] = set()
     for path in sorted(FIXTURES.glob("*.json")):
         fixture = json.loads(path.read_text())
@@ -253,6 +288,8 @@ def _cases():
             marks = []
             if case.get("requiresTier2"):
                 marks.append(pytest.mark.model)
+                if tier2_missing:
+                    marks.append(pytest.mark.skip(reason=f"needs Tier 2: {tier2_missing}"))
             if key in known:
                 marks.append(pytest.mark.xfail(strict=True, reason=known[key]))
             yield pytest.param(area, case, id=key, marks=marks)
@@ -263,8 +300,16 @@ def _cases():
 
 def test_fixtures_are_pinned():
     version = (FIXTURES / "VERSION").read_text().strip()
-    assert version, "tests/conformance/VERSION must name the TS ref the fixtures came from"
-    areas = {json.loads(p.read_text())["area"] for p in FIXTURES.glob("*.json")}
+    assert PIN_RE.match(version), (
+        f"tests/conformance/VERSION must be a full TS commit SHA or a defender-v* tag, got {version!r}"
+    )
+    fixtures = [json.loads(p.read_text()) for p in FIXTURES.glob("*.json")]
+    assert fixtures, "no fixtures in tests/conformance/"
+    for fx in fixtures:
+        assert fx["version"] == FIXTURE_FORMAT_VERSION, (
+            f"{fx['area']}: fixture format {fx['version']} isn't supported by this runner"
+        )
+    areas = {fx["area"] for fx in fixtures}
     assert areas <= set(ADAPTERS), f"fixture areas without an adapter: {areas - set(ADAPTERS)}"
 
 

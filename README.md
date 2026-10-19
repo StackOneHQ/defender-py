@@ -317,6 +317,17 @@ This package mirrors [`@stackone/defender`](https://github.com/StackOneHQ/defend
 
 - `scripts/sync_conformance.sh <ref>` copies the fixtures at a TS tag or commit and records it in `tests/conformance/VERSION`. CI checks the copy matches (`--check`).
 - Cases this package doesn't match yet are listed in `tests/conformance_known_failures.txt` and run as strict xfails. When a port makes one pass, remove its line.
+- Port contract for the runner: a rejected prompt template and an unusable verdict reply raise `ValueError`; optional result fields are `None` when unset (not `False`).
+
+Traps when porting from TypeScript (the fixtures pin TS behavior):
+
+- Lengths and slicing are in UTF-16 code units in TS, but `len()` counts code points.
+- TS `Object.entries` puts integer-like keys first. `json.loads` keeps insertion order.
+- Number rendering differs: `String(1.0)` is `"1"` but `str(1.0)` is `"1.0"`. Likewise `-0`, `1e-7` and `1e16` render differently in the two languages.
+- Python `re` has no `\p{Cf}`, and `unicodedata` versions differ across Python releases.
+- `str.splitlines()` also splits on `\x0b`, `\x0c` and `\x1c`, but TS splits only on `\r`, `\n`, `\u2028`, `\u2029` and `\u0085`.
+- JS `trim()` removes a BOM, but `str.strip()` doesn't.
+- `json.loads` accepts `NaN`, but JS `JSON.parse` rejects it. Use `parse_constant` to reject it.
 
 ## License
 

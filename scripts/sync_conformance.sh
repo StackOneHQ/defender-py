@@ -9,10 +9,16 @@ set -euo pipefail
 REPO="StackOneHQ/defender"
 DEST="tests/conformance"
 
+# A full commit SHA or a release tag only: a branch would float, and anything else may not be a TS ref.
+valid_ref() {
+	[[ "$1" =~ ^[0-9a-f]{40}$ || "$1" =~ ^defender-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
 fetch() {
 	local ref="$1" out="$2"
+	valid_ref "$ref" || { echo "invalid ref '${ref}': use a full 40-char commit SHA or a defender-vX.Y.Z tag" >&2; exit 2; }
 	# Whole archive (small: LFS models come through as pointers); portable across GNU and BSD tar.
-	curl -fsSL "https://codeload.github.com/${REPO}/tar.gz/${ref}" | tar -xz -C "$out" --strip-components=1
+	curl -fsSL --retry 3 --retry-delay 2 --max-time 60 "https://codeload.github.com/${REPO}/tar.gz/${ref}" | tar -xz -C "$out" --strip-components=1
 	[ -d "$out/conformance" ] || { echo "no conformance/ folder at ${REPO}@${ref}" >&2; exit 1; }
 }
 
