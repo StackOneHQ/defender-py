@@ -311,6 +311,13 @@ uv sync --group dev
 uv run pytest
 ```
 
+### Parity with the TypeScript package
+
+This package mirrors [`@stackone/defender`](https://github.com/StackOneHQ/defender). `tests/conformance/` is a pinned copy of its shared conformance fixtures: input → expected-output cases for Tier-3 serialization, prompt rendering, verdict parsing, error redaction and policy decisions. `tests/test_conformance.py` runs them against this package.
+
+- `scripts/sync_conformance.sh <ref>` copies the fixtures at a TS tag or commit and records it in `tests/conformance/VERSION`. CI checks the copy matches (`--check`).
+- Cases this package doesn't match yet are listed in `tests/conformance_known_failures.txt` and run as strict xfails. When a port makes one pass, remove its line.
+
 ## License
 
 Apache-2.0 — see [LICENSE](./LICENSE).
