@@ -29,6 +29,7 @@ KNOWN_FAILURES_FILE = HERE / "conformance_known_failures.txt"
 FIXTURE_FORMAT_VERSION = 1
 # A full commit SHA or a release tag. Branches would float; anything else isn't a TS ref.
 PIN_RE = re.compile(r"^([0-9a-f]{40}|defender-v\d+\.\d+\.\d+)$")
+MARKER_RE = re.compile(r"(<<<(?:END_)?[A-Z_]+ id=)([0-9a-f]{16})(>>>)")
 
 # Fixture option names (TypeScript) → this package's names.
 _TIER3_OPTION_NAMES = {
@@ -56,6 +57,7 @@ _TIER3_RESULT_FIELDS = {
     "overrideSuppressed": "override_suppressed",
     "decidedBy": "decided_by",
     "skipReason": "skip_reason",
+    "note": "note",
 }
 
 
@@ -127,8 +129,10 @@ class _ScriptedJudge:
 
     def __init__(self, judge: dict[str, Any]):
         self._judge = judge
+        self.calls = 0
 
     def classify(self, text: str, *, ctx: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.calls += 1
         verdict = next(
             (r["then"] for r in self._judge.get("rules", []) if r["ifContains"] in text),
             self._judge["default"],
@@ -161,6 +165,18 @@ def _pick_tier3(t3: Any) -> dict[str, Any] | None:
     raw = _attr(t3, "raw")
     out["hasRaw"] = raw is not None
     return out
+
+
+def _normalize_ids(contents: list[str]) -> list[str]:
+    """Real marker ids → <ID1>, <ID2>… by first appearance, so open/close pairing and
+    per-block distinctness stay pinned."""
+    ids: dict[str, str] = {}
+
+    def sub(m: re.Match[str]) -> str:
+        ids.setdefault(m[2], f"<ID{len(ids) + 1}>")
+        return f"{m[1]}{ids[m[2]]}{m[3]}"
+
+    return [MARKER_RE.sub(sub, c) for c in contents]
 
 
 def _run(coro):
@@ -198,12 +214,8 @@ def _prompt(inp: dict[str, Any]) -> dict[str, Any]:
         messages = build_tier3_messages(prompt or default_prompt, inp["text"], ctx)
     except ValueError:
         return {"error": True}
-    marker = re.compile(r"(<<<(?:END_)?[A-Z_]+ id=)[0-9a-f]{16}(>>>)")
-    return {
-        "messages": [
-            {"role": _attr(m, "role"), "content": marker.sub(r"\1<ID>\2", _attr(m, "content"))} for m in messages
-        ]
-    }
+    contents = _normalize_ids([_attr(m, "content") for m in messages])
+    return {"messages": [{"role": _attr(m, "role"), "content": c} for m, c in zip(messages, contents, strict=True)]}
 
 
 def _parse(inp: dict[str, Any]) -> dict[str, Any]:
@@ -227,8 +239,9 @@ def _redact(inp: dict[str, Any]) -> dict[str, Any]:
 
 def _policy(inp: dict[str, Any]) -> dict[str, Any]:
     tier3 = _tier3_options(inp.get("tier3"))
-    if inp.get("judge"):
-        tier3["provider"] = _ScriptedJudge(inp["judge"])
+    judge = _ScriptedJudge(inp["judge"]) if inp.get("judge") else None
+    if judge:
+        tier3["provider"] = judge
     if inp.get("decide"):
         mode = inp["decide"]
 
@@ -263,6 +276,8 @@ def _policy(inp: dict[str, Any]) -> dict[str, Any]:
     summary = _plain(getattr(r, "tier3_chunk_summary", None))
     if summary:
         out["chunkSummary"] = summary
+    if judge:
+        out["judgeCalls"] = judge.calls
     return out
 
 
@@ -311,6 +326,28 @@ def test_fixtures_are_pinned():
         )
     areas = {fx["area"] for fx in fixtures}
     assert areas <= set(ADAPTERS), f"fixture areas without an adapter: {areas - set(ADAPTERS)}"
+
+
+# Not expressible as a fixture: marker ids are random per call. Strict xfail until the
+# prompt builder is ported, so it starts running (and must pass) once it exists.
+@pytest.mark.xfail(
+    not hasattr(stackone_defender, "build_tier3_messages"),
+    reason="ENG-3500 phase 2 (ENG-3495 BYO-LLM): prompt + parser",
+    raises=NotImplementedError,
+    strict=True,
+)
+def test_marker_ids_random_per_call_and_distinct_per_block():
+    build_tier3_messages = _require("build_tier3_messages")
+    default_prompt = _require("DEFAULT_TIER3_PROMPT")
+
+    def ids() -> list[str]:
+        messages = build_tier3_messages(default_prompt, "c", {"user_goal": "g", "tool_description": "d"})
+        return [m[2] for m in MARKER_RE.finditer("\n".join(_attr(m, "content") for m in messages))]
+
+    a, b = ids(), ids()
+    assert len(a) == 6  # 3 blocks × open/close
+    assert len(set(a)) == 3
+    assert not set(a) & set(b)
 
 
 @pytest.mark.parametrize(("area", "case"), list(_cases()))
