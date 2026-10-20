@@ -39,6 +39,7 @@ class TestTier2ClassifierConfig:
     def test_default_config(self):
         c = Tier2Classifier()
         assert c.get_risk_level(0.9) == "high"
+        assert c.get_risk_level(0.52) == "high"  # the recalibrated boundary
         assert c.get_risk_level(0.51) == "medium"  # medium is [0.5, 0.52) with the bundled model
         assert c.get_risk_level(0.3) == "low"
 

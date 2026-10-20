@@ -102,6 +102,7 @@ class TestTier2Classifier:
 
     def test_risk_levels(self):
         assert self.classifier.get_risk_level(0.9) == "high"
+        assert self.classifier.get_risk_level(0.52) == "high"  # the recalibrated boundary
         assert self.classifier.get_risk_level(0.51) == "medium"  # medium is [0.5, 0.52) with the bundled model
         assert self.classifier.get_risk_level(0.3) == "low"
 
@@ -119,6 +120,7 @@ class TestTier2ClassifierNoModel:
     def test_risk_level_thresholds(self):
         c = Tier2Classifier()
         assert c.get_risk_level(0.9) == "high"
+        assert c.get_risk_level(0.52) == "high"  # the recalibrated boundary
         assert c.get_risk_level(0.51) == "medium"  # medium is [0.5, 0.52) with the bundled model
         assert c.get_risk_level(0.3) == "low"
         assert c.get_risk_level(0.0) == "low"
