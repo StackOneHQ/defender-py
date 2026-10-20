@@ -26,7 +26,7 @@
 
 ---
 
-Indirect prompt injection defense for AI agents using tool calls (MCP, CLI, or direct APIs). Detects and neutralizes attacks hidden in tool results (emails, documents, PRs, etc.) before they reach your LLM.
+Indirect prompt injection defense for AI agents using tool calls (MCP, CLI, or direct APIs). Detects and gates prompt injection attacks hidden in tool results (emails, documents, PRs, etc.) before they reach your LLM.
 
 **Python package:** [`stackone-defender`](https://pypi.org/project/stackone-defender/) — aligned with [`@stackone/defender`](https://www.npmjs.com/package/@stackone/defender) on npm.
 
@@ -35,35 +35,30 @@ Indirect prompt injection defense for AI agents using tool calls (MCP, CLI, or d
 **pip**
 
 ```bash
-pip install stackone-defender
+pip install "stackone-defender[onnx]"
 ```
 
 **uv**
 
 ```bash
-uv add stackone-defender
+uv add "stackone-defender[onnx]"
 ```
 
-**Tier 2 (ONNX)** — add extras:
+The `[onnx]` extra runs Tier 2 (ML classification). The ONNX model (~22MB) is bundled in the wheel, so nothing is downloaded at runtime.
 
-```bash
-pip install stackone-defender[onnx]
-# or: uv add "stackone-defender[onnx]"
-```
-
-The ONNX model (~22MB) is bundled in the wheel — no extra downloads at runtime.
+Tier 2 is on by default. Without the `[onnx]` extra, defender logs one warning, sets `result.tier2_available = False` (alert on it) and runs Tier 1 only. Pass `require_tier2=True` to raise instead, or `enable_tier2=False` to run Tier 1 only on purpose.
 
 **SFE preprocessor (optional)** — add extras:
 
 ```bash
-pip install stackone-defender[sfe]
+pip install "stackone-defender[sfe]"
 # or: uv add "stackone-defender[sfe]"
 ```
 
 **Tier 3 over an OpenAI-compatible endpoint (optional)** — add extras:
 
 ```bash
-pip install stackone-defender[llm]
+pip install "stackone-defender[llm]"
 # or: uv add "stackone-defender[llm]"
 ```
 
@@ -104,7 +99,7 @@ else:
 
 Detects (never rewrites) injection signals and records them as evidence:
 
-- **Unicode normalization** (for matching only) — homoglyph resistance (e.g. Cyrillic `а` → ASCII `a`)
+- **Unicode / leet normalization** (for matching only) — homoglyph resistance (e.g. Cyrillic `а` → ASCII `a`)
 - **Role markers** — `SYSTEM:`, `ASSISTANT:`, `<system>`, `[INST]`, etc.
 - **Instruction-override patterns** — phrases like “ignore previous instructions”
 - **Encoding detection** — decode-then-detect: a decoded payload is escalated only if it trips a real attack pattern
@@ -117,6 +112,8 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 - Split text into sentences, pack to model-sized chunks, score chunks in batched ONNX calls
 - Catches paraphrased or novel injections missed by regex
 - Uses chunked batch inference to bound memory on large payloads
+- The bundled model is multi-head. Its auxiliary head flags meta-discussion and documentation that quotes injection text. Turn the multi-head rule on with `tier2_config={"multihead": MultiheadConfig(main_threshold=..., aux_threshold=...)}`: a chunk then blocks only when its main score >= `main_threshold` and its aux score < `aux_threshold`. The result reports `tier2_aux_score` and `tier2_multihead_blocked`.
+- The bundled model carries calibrated defaults in its `classifier_config.json` (`high_risk_threshold` 0.64 at temperature 2.41). They override library defaults when the model loads.
 
 ### Optional SFE preprocessor
 
@@ -136,7 +133,7 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 
 ### Optional Tier 3 — LLM adjudication (bring your own LLM)
 
-Authoritative LLM-based classification for the cases Tier 2 finds ambiguous. You bring the model. Defender gives you three ways to plug it in:
+An LLM reviews the cases Tier 2 is unsure about (cascade), or every tool result (`tier3_only`). You bring the model. Defender builds the prompt, reads back a `block`/`allow` verdict and applies your policy. Three ways to plug a model in:
 
 1. **`create_openai_compatible_tier3_provider`**: any OpenAI-compatible `/chat/completions` endpoint (OpenAI, vLLM, Ollama, OpenRouter, LiteLLM). Needs the `[llm]` extra.
 2. **`create_llm_tier3_provider`**: any other LLM. You write one `complete` function that calls the model; defender owns the prompt, the untrusted-text markers, strict reply parsing and refusal handling.
@@ -144,7 +141,7 @@ Authoritative LLM-based classification for the cases Tier 2 finds ambiguous. You
 
 Two modes, selected via `defender_mode`:
 - **`"cascade"`** (default): Tier 1 → Tier 2 → Tier 3, with Tier 3 invoked only when the Tier 2 effective score falls in the gray band (default `[0.3, 0.85)`). The Tier 3 verdict overrides Tier 2 on the escalated chunk — a `block` forces a block, an `allow` rescues it. Outside the band defender skips the round trip.
-- **`"tier3_only"`**: skip Tier 2; the block/allow decision is the Tier 3 verdict alone. Tier 1 still runs detection; the returned `sanitized` payload is the original content.
+- **`"tier3_only"`**: skip Tier 2. Only the Tier 3 verdict decides. Tier 1 still fills `detections` but doesn't block. `sanitized` is the original content.
 
 ```python
 import os
@@ -162,12 +159,16 @@ defense = create_prompt_defense(
     defender_mode="tier3_only",
     tier3={"provider": judge, "timeout_ms": 10_000, "on_error": "block"},
 )
-result = await defense.defend_tool_result_async(
-    tool_output, "gmail_get_message", context={"user_goal": "Summarize my unread mail"}
-)
+
+async def handle(tool_output):
+    return await defense.defend_tool_result_async(
+        tool_output, "gmail_get_message", context={"user_goal": "Summarize my unread mail"}
+    )
 ```
 
-Around any other LLM, `complete` gets a request with `messages` (system + user), `deadline` and `json_schema`, and returns the reply text (sync or async):
+`create_openai_compatible_tier3_provider` options: `headers`, `response_format` (`"json_schema"` by default, or `"json_object"` / `"none"`), `max_tokens` (300, sent as `max_completion_tokens` unless `legacy_max_tokens=True`), `temperature` (not sent unless set), `retries` (1 extra attempt on 429, 5xx and network errors, within the deadline), `prompt`, `parse`, and `client` (an `httpx.AsyncClient` to reuse; recommended in production for connection pooling). `base_url` must use https, except for localhost and `127.x.x.x`; `allow_insecure_http=True` allows plain http anyway. Put credentials in `api_key` or `headers`, not in the URL. A moderation hit (`content_filter`, `invalid_prompt`) counts as a refusal and blocks.
+
+For any other LLM, write a `complete(req)` function. `req` has `messages` (system + user), `deadline` and `json_schema`. Return the reply text, sync or async:
 
 ```python
 import time
@@ -183,15 +184,14 @@ async def complete(req):
 judge = create_llm_tier3_provider(complete=complete)
 ```
 
-The default prompt (`DEFAULT_TIER3_PROMPT`, version `TIER3_PROMPT_VERSION`) wraps the tool output, user goal and tool description in random-id markers and asks for `{"decision": "block" | "allow", "reason": "..."}`. Pass `prompt=Tier3PromptTemplate(system=..., user=...)` (the `user` part must contain `{{content}}` once; also `{{toolName}}`, `{{userGoal}}`, `{{toolDescription}}`) or a builder function that gets a `PromptInput`. A refusal, a content-filter hit, or a reply that isn't exactly one JSON verdict **blocks** (`result.tier3.refused`), because attacker text can cause those on purpose. `result.tier3.reason` is model output that can quote the attacker: log it, but never feed it back to an agent.
+The default prompt (`DEFAULT_TIER3_PROMPT`, version `TIER3_PROMPT_VERSION`) wraps the tool output, user goal and tool description in random-id markers and asks for `{"decision": "block" | "allow", "reason": "..."}`. Pass `prompt=Tier3PromptTemplate(system=..., user=...)` (the `user` part must contain `{{content}}` once and may use `{{toolName}}`, `{{userGoal}}`, `{{toolDescription}}`; `system` must not contain placeholders), or a builder function that gets a `PromptInput` and returns the message list. A refusal, a content-filter hit, or a reply that isn't exactly one JSON verdict **blocks** (`result.tier3.refused`), because attacker text can cause those on purpose. `result.tier3.reason` is model output that can quote the attacker: log it, but never feed it back to an agent.
 
 A hand-written provider, registered once at startup:
 
 ```python
 from typing import Any
 
-from stackone_defender import create_prompt_defense, set_default_tier3_provider
-from stackone_defender.types import Tier3Verdict
+from stackone_defender import Tier3Verdict, create_prompt_defense, set_default_tier3_provider
 
 class MyProvider:
     def classify(self, text: str, *, ctx: dict[str, Any] | None = None) -> Tier3Verdict:
@@ -217,6 +217,8 @@ defense = create_prompt_defense(
 )
 ```
 
+Defender looks up the registered provider on every call, so registering after construction works. `set_default_tier3_provider(None)` clears it (useful in tests), and `get_default_tier3_provider()` reads it.
+
 **What the reviewer sees (`tier3_only`).** The tool result is serialized as `field: value` lines, one block per record, so a bare value keeps its field name (`status: create` rather than `create`, which reads like an instruction). Nested keys are dotted (`user.name: …`), list items are indexed (`items[0]: …`), and each line of a multi-line value keeps its prefix. A large list of only numbers collapses to `key: [N numbers]`. Keys are reviewed even when the value is a number, boolean, `None` or empty, because keys can carry injected text. Python-only types are reviewed too: mappings and dataclasses as objects, sets and other sequences as lists, UTF-8 `bytes` as text, and anything else as `str(value)`.
 
 The serialized text is split into chunks of at most `max_text_length` characters (lengths count UTF-16 code units, as in the TypeScript package). Neighbouring chunks overlap by up to 500 characters, so an injection cut at a chunk boundary still appears whole. All chunks are reviewed in parallel, and any blocking chunk blocks the result. `result.tier3_chunk_summary` reports `chunks`, `blocked` and `blocking_chunk`.
@@ -230,22 +232,27 @@ In `"skip"` and `"scan_anyway"`, `tier3_chunk_summary.oversize` is `True`.
 
 A failed chunk is skipped (fail open), and `result.tier3.errored` and `coverage_degraded` are `True`. With a verdict, `result.tier3.note` says how many chunks failed; it also gives the reason for an `on_oversize` block when the provider allowed. When every chunk fails there's no verdict, and `result.tier3.skip_reason` gives the first failure.
 
-**Choosing the operating point (`block_threshold`).** By default the model's `decision` word is authoritative — but that word is its argmax, an implicit 0.5 cut that moves on its own whenever the model is retrained. Set `tier3.block_threshold` to decide on `verdict.score` (P(block)) instead: the cut becomes an explicit config value — raise it to trade recall for fewer false positives, lower it for the reverse; `0.5` reproduces argmax. It requires a provider that reports `score` as P(block) (not "confidence in whichever decision I made" — those invert on allows). If `score` is missing or outside `[0, 1]` the verdict's `decision` is used instead and defender warns once, so a provider that cannot report a score degrades to the default rather than failing.
+**Choosing the operating point (`block_threshold`).** By default the model's `decision` word decides. That word is an implicit 0.5 cut that moves whenever the model is retrained. Set `tier3.block_threshold` to decide on `verdict.score` (P(block)) instead. Raise it for fewer false positives, lower it for more recall; `0.5` reproduces the word. The provider must report `score` as a real P(block), not "confidence in whichever decision I made". If `score` is missing or outside `[0, 1]`, defender uses `decision` and warns once.
 
 **Policy options** (all in `tier3={...}`; camelCase keys work too):
 
 | Option | Default | What it does |
 |---|---|---|
-| `allow_override` | `True` | Cascade: whether a Tier-3 `allow` can undo a Tier-2 block. `False`: Tier 3 only adds blocks. `{"max_tier2_score": x}`: only when Tier 2's undamped score is below `x`. A general-purpose LLM can be talked into `allow`, so prefer `False` or a cap (defender warns once otherwise). |
-| `on_error` | cascade `"tier2"`, tier3_only `"allow"` | What a failure (error, timeout, invalid verdict) does. `"tier2"` keeps Tier 2's verdict. `"allow"` treats it as an allow. `"block"` blocks: in cascade when Tier 2 rated the payload medium or higher; in tier3_only when any chunk failed (and `on_oversize` then defaults to `"scan_anyway"`). A missing provider fails closed too. |
-| `decide` | none | `decide(Tier3DecisionInput) -> "block" \| "allow" \| "default"`, called once per call after Tier 3 ran or failed. Replaces `allow_override` and `on_error` for that call. Gets metadata only (never content). A raise or bad return means `"default"`. |
+| `allow_override` | `True` | Cascade: whether a Tier-3 `allow` can undo a Tier-2 block. `False`: Tier 3 only adds blocks. `{"max_tier2_score": x}`: only when Tier 2's undamped score is below `x`. A general-purpose LLM can be talked into `allow`, so prefer `False` or a cap. Defender warns once when it's `True` with a provider from `create_llm_tier3_provider` or `create_openai_compatible_tier3_provider`. |
+| `on_error` | cascade `"tier2"`, tier3_only `"allow"` | What a failure (error, timeout, invalid verdict) does. `"tier2"` keeps Tier 2's verdict. `"allow"` treats it as an allow. `"block"` blocks: in cascade when Tier 2 rated the payload medium or higher; in tier3_only when any chunk failed (and `on_oversize` then defaults to `"scan_anyway"`). A missing provider fails closed too. `"tier2"` isn't valid in tier3_only: defender warns and uses `"allow"`. |
+| `decide` | none | `decide(Tier3DecisionInput) -> "block" \| "allow" \| "default"`, called once per call after Tier 3 ran or failed. Replaces `allow_override` and `on_error` for that call. Gets metadata only (never content). Must be synchronous. A raise or bad return means `"default"`. It can't undo a Tier 1 detection, override `on_oversize`, or block when `block_high_risk=False`. |
 | `timeout_ms` | none | Per provider call, from when it gets a concurrency slot. An async provider is cancelled at the deadline (`ctx["deadline"]`); a sync one can't be interrupted. |
-| `max_concurrency` | unbounded | Max in-flight provider calls per instance (per event loop). Set `timeout_ms` with it. |
+| `max_concurrency` | unbounded | Max in-flight provider calls per instance, per event loop. Each sync `defend_tool_result` call runs its own loop, so the cap doesn't span threads that use the sync API. Set `timeout_ms` with it. |
 | `stop_on_first_block` | `False` | tier3_only: cancel the remaining chunk calls once one blocks. |
 | `on_event` | none | Called once per provider call with a `Tier3Event` (kind, mode, chunk, latency, usage, redacted error code). No content. Exceptions are ignored. |
 | `include_raw` | `True` | Keep `raw` on `result.tier3`. `raw` can quote tool content. |
 
-**Result fields.** `result.tier3` is a `Tier3Verdict` (or a `Tier3Skip` when no verdict was obtained) and `None` when Tier 3 didn't run. Besides `decision`, `score`, `reason`, `refused` and `prompt_version`, defender sets: `errored` (a real failure), `note` (why the outcome isn't the verdict's alone), `override_applied` / `override_suppressed` (cascade), and `decided_by` (`"policy"` or `"options"` when `decide` is set). Provider error text in `skip_reason`, `note` and events is redacted (keys, tokens, URL paths) and capped.
+**Result fields.** `result.tier3` is a `Tier3Verdict` (or a `Tier3Skip` when no verdict was obtained) and `None` when Tier 3 didn't run. Besides `decision`, `score`, `reason`, `refused` and `prompt_version`, defender sets: `errored` (a real failure), `note` (why the outcome isn't the verdict's alone), `override_applied` / `override_suppressed` (cascade), and `decided_by` (`"policy"` or `"options"` when `decide` is set). Provider error text in `skip_reason`, `note` and events is redacted (keys, tokens, URL paths) and capped. `Tier3Skip`, `Tier3Event` and `Tier3DecisionInput` are in `stackone_defender.types`.
+
+- `allowed` is the final answer. With `allow_override=False`, `result.tier3.decision` can be `"allow"` while `allowed` is `False`.
+- Defender warns once after 20 consecutive provider failures on one instance, and once after 20 consecutive refusals or unusable replies. Use `on_event` for alerting.
+- A call that never finishes gives its `max_concurrency` slot back after 10 × `timeout_ms`. Waiting for a slot is capped at 10 × `timeout_ms` too.
+- Tier 3 sends tool output to the endpoint you configure. `reason` and `raw` can quote it: don't log them where tool content mustn't go, and set `include_raw=False` if needed.
 
 **Cancellation.** Cancelling the task that awaits `defend_tool_result_async` cancels in-flight provider calls and raises `CancelledError`.
 
@@ -255,7 +262,7 @@ A failed chunk is skipped (fail open), and `result.tier3.errored` and `coverage_
 
 - **`DefenseResult.sanitized`** is a **sentence-level cleaned** copy of the tool result (high-scoring sentences dropped within high-risk fields, optionally `[UD-…]` boundary-wrapped). Cleaning is best-effort (capped by detection) — still gate on `allowed`. Set `sanitize_content=False` for pure detect-and-gate: `sanitized` is then the input verbatim.
 - Use **`allowed`** for gating when `block_high_risk=True`: `False` means do not pass `sanitized` to the model as-is.
-- **`risk_level`** is diagnostic: it starts at `default_risk_level` (default `"low"`) and is **escalated** by Tier 1 / Tier 2 signals — not reduced. Use it for logging, not as the sole block signal unless you implement your own policy.
+- **`risk_level`** is diagnostic: it starts at `default_risk_level` (default `"low"`) and is **escalated** by Tier 1 / Tier 2 signals. When Tier 3 runs, its verdict can lower it (a cascade `allow` override) or set it (`tier3_only`). Use it for logging, not as the sole block signal unless you implement your own policy.
 
 | Level | Typical trigger |
 |-------|------------------|
@@ -275,20 +282,21 @@ defense = create_prompt_defense(
     block_high_risk=False,
     default_risk_level="low",
     annotate_boundary=False,  # True: wrap risky strings with [UD-…] tags (npm: annotateBoundary)
+    sanitize_content=True,  # False: detect-and-gate; sanitized is the input verbatim
     tier2_fields=["subject", "body", "snippet"],  # optional: scope Tier 2 to these JSON keys (default: all strings)
-    use_sfe=True,  # optional: enable semantic field extractor preprocessing
-    config={
-        "tier2": {
-            "high_risk_threshold": 0.8,
-            "tier2_fields": None,  # or list[str]; constructor tier2_fields wins if set
-        },
-    },
+    tier2_config={"high_risk_threshold": 0.64},  # optional; defaults come from the bundled model's classifier_config.json
+    use_sfe=False,  # True, or {"threshold": 0.5, "predictor": ...}: SFE preprocessing before Tier 2
+    enable_tier3=False,
+    defender_mode="cascade",  # or "tier3_only"; ignored unless enable_tier3
+    tier3=None,  # dict of Tier 3 options (see Tier 3 above)
 )
 ```
 
+Set Tier 2 thresholds with `tier2_config`. The bundled model's calibrated values override library defaults, so threshold keys under `config["tier2"]` are ignored.
+
 ### `defense.defend_tool_result(value, tool_name, *, context=None)`
 
-Runs Tier 1 sanitization on risky fields of the **original** payload, then Tier 2 on strings from the SFE-filtered view when SFE is on (otherwise the full value). Optional `tier2_fields` restricts Tier 2 extraction to specific keys; omit it to classify **all** strings (matches `@stackone/defender` 0.6.3). **Synchronous** — no `await`.
+Runs Tier 1 detection on the original payload, then Tier 2 on its strings (the SFE-filtered view when `use_sfe` is on). `tier2_fields` limits Tier 2 to those keys; omit it to classify all strings. The call is synchronous. With `enable_tier3=True` it runs Tier 3 in its own event loop and raises `RuntimeError` inside a running loop: use `await defense.defend_tool_result_async(...)` there. `context` (`user_goal`, `tool_description`) goes to the Tier 3 provider only.
 
 ```python
 from dataclasses import dataclass, field
@@ -304,7 +312,7 @@ class DefenseResult:
     detected_field_count: int                 # count of fields with a Tier-1 detection (keys of patterns_by_field); threat-count signal (fields_sanitized len no longer tracks this)
     tier2_score: float | None = None
     tier2_raw_score: float | None = None
-    tier2_aux_score: float | None = None      # multi-head models only
+    tier2_aux_score: float | None = None      # set only when tier2_config["multihead"] is set
     tier2_multihead_blocked: bool | None = None
     tier2_skip_reason: str | None = None
     max_sentence: str | None = None
@@ -325,7 +333,7 @@ class DefenseResult:
 
 ### `defense.defend_tool_results(items)`
 
-Sync batch API. When `enable_tier3=True`, uses one `asyncio.run()` and defends items **concurrently** via `asyncio.gather` (same scheduling model as npm `defendToolResults`; blocking sync providers still run one at a time on the event-loop thread). From async code, prefer `defend_tool_results_async`.
+Sync batch API. Each item is `{"value": ..., "tool_name": ..., "context": {...}}` (`context` optional). Without Tier 3 it runs items one by one. With `enable_tier3=True` it runs them concurrently in one `asyncio.run()` (sync providers still run one at a time) and raises `RuntimeError` inside a running event loop. From async code, use `defend_tool_results_async`.
 
 ```python
 results = defense.defend_tool_results([
@@ -357,7 +365,7 @@ Tier 1 only — useful for debugging pattern hits without full tool-result trave
 
 ```python
 defense = create_prompt_defense()
-defense.warmup_tier2()  # no-op if enable_tier2=False or ONNX extra missing
+defense.warmup_tier2()  # no-op if enable_tier2=False; warns (or raises with require_tier2=True) if the [onnx] extra is missing
 ```
 
 ## Integration example
@@ -380,13 +388,13 @@ sanitized = run_tool_and_defend(gmail_api.get_message(msg_id), "gmail_get_messag
 
 ## Risky field detection
 
-Only **string** values under configured “risky” keys are Tier-1-scanned — including strings nested inside arrays/objects under those keys (e.g. `{"name": ["…"]}`). [`RiskyFieldConfig`](https://github.com/StackOneHQ/defender-py/blob/main/src/stackone_defender/types.py) provides global names/patterns plus **`tool_overrides`** (wildcard tool names → field list), same idea as the npm package. (Tier 2 scans all extracted strings regardless.)
+Only **string** values under configured “risky” keys are Tier-1-scanned — including strings nested inside arrays/objects under those keys (e.g. `{"name": ["…"]}`). [`RiskyFieldConfig`](https://github.com/StackOneHQ/defender-py/blob/main/src/stackone_defender/types.py) provides global names/patterns plus **`tool_overrides`** (wildcard tool names → field list), same idea as the npm package. Tier 1 also scans object keys. Tier 2 scans all string values whatever the field name (unless `tier2_fields` is set), so an injection in `id` or `url` is still scored.
 
 | Tool pattern | Scanned fields |
 |--------------|----------------|
 | `gmail_*`, `email_*` | subject, body, snippet, content |
 | `documents_*` | name, description, content, title |
-| `github_*` | name, title, body, description, message |
+| `github_*` | name, title, body, description, message, content |
 | `hris_*` | name, notes, bio, description |
 | `ats_*` | name, notes, description, summary |
 | `crm_*` | name, description, notes, content |
