@@ -67,8 +67,8 @@ class TestBuildHook:
             hatch_build.check_model_file(str(ROOT / rel), floor)
 
 
-@pytest.mark.model
 class TestLoaderWiring:
+    @pytest.mark.model
     def test_onnx_load_reports_pointer(self, tmp_path):
         pytest.importorskip("onnxruntime")
         pytest.importorskip("tokenizers")
@@ -80,6 +80,7 @@ class TestLoaderWiring:
         with pytest.raises(RuntimeError, match="git lfs pull"):
             OnnxClassifier(model_path=str(model_dir)).load_model()
 
+    @pytest.mark.sfe
     def test_sfe_load_fails_open_with_clear_warning(self, tmp_path, caplog):
         pytest.importorskip("fasttext")
         from stackone_defender.sfe.preprocess import get_default_predictor
