@@ -106,7 +106,8 @@ def create_openai_compatible_tier3_provider(
     - ``temperature``: not sent unless set (some reasoning models reject it).
     - ``retries``: extra attempts on 429, 5xx and network errors while the deadline allows. Default 1.
     - ``client``: an ``httpx.AsyncClient`` to reuse. Recommended in production: without it each call
-      opens a new client (no connection pooling) that ignores proxy settings from the environment.
+      opens a new client (no connection pooling) with httpx defaults, including proxy and CA
+      settings from the environment.
     - ``allow_insecure_http``: allow plain http to a non-local host. Tool content and the key then
       travel unencrypted.
 
@@ -134,6 +135,8 @@ def create_openai_compatible_tier3_provider(
                 "create_openai_compatible_tier3_provider: header names and values must be single-line strings"
             )
     if api_key:
+        if not isinstance(api_key, str) or _HEADER_BAD_RE.search(api_key):
+            raise ValueError("create_openai_compatible_tier3_provider: `api_key` must be a single-line string")
         # One Authorization header: a differently-cased duplicate would be sent too.
         req_headers = {k: v for k, v in req_headers.items() if k.lower() != "authorization"}
         req_headers["Authorization"] = f"Bearer {api_key}"
@@ -208,9 +211,9 @@ def create_openai_compatible_tier3_provider(
 
         if client is not None:
             return await post(client)
-        # Like fetch, ignore proxy and netrc settings from the environment. Pass `client` to pool
-        # connections or to use a proxy.
-        async with httpx.AsyncClient(trust_env=False) as http:
+        # httpx defaults: proxy and CA settings from the environment apply. Pass `client` to pool
+        # connections or to control them.
+        async with httpx.AsyncClient() as http:
             return await post(http)
 
     return create_llm_tier3_provider(complete=complete, prompt=prompt, parse=parse)
