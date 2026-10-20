@@ -305,9 +305,16 @@ class TestTier3OversizedPythonTypes:
             defender_mode="tier3_only",
             tier3={"provider": judge, "on_oversize": "block"},
         )
-        r = _run(defense, {"name": "x", "big": big(5000)})
-        assert not r.allowed
-        assert r.coverage_degraded is True
+        for value in ({"name": "x", "big": big(5000)}, big(5000)):
+            r = _run(defense, value)
+            assert judge.calls == []
+            assert not r.allowed
+            assert r.coverage_degraded is True
+
+    def test_huge_range_reviewed_as_text(self):
+        judge = _Judge()
+        _run(_tier3_only(judge), {"r": range(10**30)})
+        assert judge.calls == [f"r: {range(10**30)}"]
 
 
 class TestTier3OnlyOutcomes:

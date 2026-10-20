@@ -198,8 +198,11 @@ def _normalize(v: Any, limit: int) -> Any:
     decode as UTF-8 become text (other bytes stay binary). Anything else is reviewed as ``str(v)``.
     A value longer than ``limit`` isn't copied: it becomes an ``_Oversized`` that trips the meter.
     """
-    if v is None or isinstance(v, (str, bool, int, float, list, tuple, dict)):
+    if v is None or isinstance(v, (str, bool, int, float, list, tuple, dict, _Oversized)):
         return v
+    # range is lazy, and len() on a huge one overflows: review it as text.
+    if isinstance(v, range):
+        return str(v)
     size = (
         v.nbytes
         if isinstance(v, memoryview)
@@ -218,8 +221,7 @@ def _normalize(v: Any, limit: int) -> Any:
         return {f.name: getattr(v, f.name) for f in dataclasses.fields(v)}
     if isinstance(v, Mapping):
         return dict(v.items())
-    # range is lazy: listing it could allocate without bound.
-    if isinstance(v, (AbstractSet, Sequence)) and not isinstance(v, range):
+    if isinstance(v, (AbstractSet, Sequence)):
         return list(v)
     return str(v)
 
