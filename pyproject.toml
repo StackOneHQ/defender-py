@@ -43,6 +43,7 @@ dev = [
   "numpy>=1.24.0",
   "fasttext-ng>=0.9.3",
   "httpx>=0.27",
+  "hatchling",
 ]
 
 [build-system]
@@ -51,6 +52,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stackone_defender"]
+
+# Fails the build if a bundled model is a Git LFS pointer, truncated, or missing (hatch_build.py).
+[tool.hatch.build.hooks.custom]
 
 [tool.hatch.build.targets.sdist]
 exclude = ["/models", "/.github"]  # legacy model + CI, dev-only
