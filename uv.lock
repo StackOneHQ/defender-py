@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 
 [[package]]
@@ -625,6 +625,9 @@ version = "0.9.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
+llm = [
+    { name = "httpx" },
+]
 onnx = [
     { name = "numpy" },
     { name = "onnxruntime" },
@@ -637,6 +640,7 @@ sfe = [
 [package.dev-dependencies]
 dev = [
     { name = "fasttext-ng" },
+    { name = "httpx" },
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "pytest" },
@@ -648,15 +652,17 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fasttext-ng", marker = "extra == 'sfe'", specifier = ">=0.9.3" },
+    { name = "httpx", marker = "extra == 'llm'", specifier = ">=0.27" },
     { name = "numpy", marker = "extra == 'onnx'", specifier = ">=1.24.0" },
     { name = "onnxruntime", marker = "extra == 'onnx'", specifier = ">=1.16.0" },
     { name = "tokenizers", marker = "extra == 'onnx'", specifier = ">=0.15.0" },
 ]
-provides-extras = ["onnx", "sfe"]
+provides-extras = ["onnx", "sfe", "llm"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "fasttext-ng", specifier = ">=0.9.3" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "onnxruntime", specifier = ">=1.16.0" },
     { name = "pytest", specifier = ">=8.0" },
