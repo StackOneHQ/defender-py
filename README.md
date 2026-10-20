@@ -1,16 +1,19 @@
 <div align="center">
 
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/StackOneHQ/defender/main/assets/banner-dark.svg" />
-    <img src="https://raw.githubusercontent.com/StackOneHQ/defender/main/assets/banner-light.svg" alt="Defender by StackOne — Indirect prompt injection protection for MCP tool calls" width="800" />
-  </picture>
+  <a href="https://www.stackone.com/platform/prompt-injection-guard/?utm_source=pypi&utm_medium=readme&utm_campaign=banner">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/StackOneHQ/defender/main/assets/banner-dark.svg" />
+      <img src="https://raw.githubusercontent.com/StackOneHQ/defender/main/assets/banner-light.svg" alt="Defender by StackOne — Indirect prompt injection protection for MCP tool calls" width="800" />
+    </picture>
+  </a>
 
   <p>
     <a href="https://pypi.org/project/stackone-defender/"><img src="https://img.shields.io/pypi/v/stackone-defender?style=flat-square&color=047B43&label=pypi" alt="PyPI version" /></a>
-    <a href="https://github.com/StackOneHQ/stackone-defender/releases"><img src="https://img.shields.io/github/v/release/StackOneHQ/stackone-defender?style=flat-square&color=047B43&label=release" alt="latest GitHub release" /></a>
-    <a href="https://github.com/StackOneHQ/stackone-defender/stargazers"><img src="https://img.shields.io/github/stars/StackOneHQ/stackone-defender?style=flat-square&color=047B43" alt="GitHub stars" /></a>
+    <a href="https://github.com/StackOneHQ/defender-py/releases"><img src="https://img.shields.io/github/v/release/StackOneHQ/defender-py?style=flat-square&color=047B43&label=release" alt="latest GitHub release" /></a>
+    <a href="https://github.com/StackOneHQ/defender-py/stargazers"><img src="https://img.shields.io/github/stars/StackOneHQ/defender-py?style=flat-square&color=047B43" alt="GitHub stars" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/pypi/l/stackone-defender?style=flat-square&color=047B43" alt="License" /></a>
     <img src="https://img.shields.io/badge/Python-3.11+-047B43?style=flat-square" alt="Python 3.11+" />
+    <a href="https://defender.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=badge"><img src="https://img.shields.io/badge/site-defender.stackone.com-047B43?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iI2ZmZiI+PHBhdGggZD0iTTEyIDFMMyA1djZjMCA1LjI1IDMuOCAxMC4xIDkgMTEgNS4yLS45IDktNS43NSA5LTExVjVsLTktNHoiLz48L3N2Zz4=" alt="Defender site" /></a>
   </p>
   <p>
     <img src="https://img.shields.io/badge/model-22MB-047B43?style=flat-square" alt="Model size: 22MB" />
@@ -377,7 +380,7 @@ sanitized = run_tool_and_defend(gmail_api.get_message(msg_id), "gmail_get_messag
 
 ## Risky field detection
 
-Only **string** values under configured “risky” keys are Tier-1-scanned — including strings nested inside arrays/objects under those keys (e.g. `{"name": ["…"]}`). [`RiskyFieldConfig`](https://github.com/StackOneHQ/stackone-defender/blob/main/src/stackone_defender/types.py) provides global names/patterns plus **`tool_overrides`** (wildcard tool names → field list), same idea as the npm package. (Tier 2 scans all extracted strings regardless.)
+Only **string** values under configured “risky” keys are Tier-1-scanned — including strings nested inside arrays/objects under those keys (e.g. `{"name": ["…"]}`). [`RiskyFieldConfig`](https://github.com/StackOneHQ/defender-py/blob/main/src/stackone_defender/types.py) provides global names/patterns plus **`tool_overrides`** (wildcard tool names → field list), same idea as the npm package. (Tier 2 scans all extracted strings regardless.)
 
 | Tool pattern | Scanned fields |
 |--------------|----------------|
@@ -415,6 +418,15 @@ Traps when porting from TypeScript (the fixtures pin TS behavior):
 - `str.splitlines()` also splits on `\x0b`, `\x0c` and `\x1c`, but TS splits only on `\r`, `\n`, `\u2028`, `\u2029` and `\u0085`.
 - JS `trim()` removes a BOM, but `str.strip()` doesn't.
 - `json.loads` accepts `NaN`, but JS `JSON.parse` rejects it. Use `parse_constant` to reject it.
+
+## Defender by StackOne
+
+Defender is built and maintained by [StackOne](https://www.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=about), the enterprise integration platform for AI agents. We run Defender in production to protect agent tool calls against indirect prompt injection.
+
+- **Defender site** — [defender.stackone.com](https://defender.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=about)
+- **Overview & benchmarks** — [stackone.com/platform/prompt-injection-guard](https://www.stackone.com/platform/prompt-injection-guard/?utm_source=pypi&utm_medium=readme&utm_campaign=about)
+- **StackOne platform** — [stackone.com](https://www.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=about)
+- **TypeScript package** — [`@stackone/defender`](https://www.npmjs.com/package/@stackone/defender) ([StackOneHQ/defender](https://github.com/StackOneHQ/defender))
 
 ## License
 
