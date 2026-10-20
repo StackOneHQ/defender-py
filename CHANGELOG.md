@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.8.2...stackone-defender-v0.9.0) (2026-10-20)
+
+
+### Features
+
+* **ENG-3500:** record-oriented, chunked Tier-3 review in tier3_only ([#35](https://github.com/StackOneHQ/defender-py/issues/35)) ([072d7ed](https://github.com/StackOneHQ/defender-py/commit/072d7ed7f0474afa5ffe87a66920d279ad7fafdd))
+
+
+### Miscellaneous Chores
+
+* **ENG-3500:** release 0.9.0 ([#37](https://github.com/StackOneHQ/defender-py/issues/37)) ([aa4a4e3](https://github.com/StackOneHQ/defender-py/commit/aa4a4e39fcb7a7adc6d43fbab8d7b84817613dbc))
+
 ## [0.8.2](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.7.4...stackone-defender-v0.8.2) (2026-08-19)
 
 
