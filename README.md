@@ -153,11 +153,24 @@ defense = create_prompt_defense(
     tier3={
         "provider": MyProvider(),                          # optional: overrides the registry for this instance
         "escalation_band": {"lower": 0.3, "upper": 0.85},  # cascade gray band; [lower, upper), defaults shown
-        "max_text_length": 10000,                          # caps text passed to the provider
+        "max_text_length": 10000,                          # max chars per provider call
+        "max_chunks": 5,                                   # tier3_only: chunks reviewed per tool result
+        "on_oversize": "skip",                             # tier3_only: "skip" | "block" | "scan_anyway"
         "block_threshold": 0.622,                          # optional; decide on score, not the model's word
     },
 )
 ```
+
+**What the reviewer sees (`tier3_only`).** The tool result is serialized as `field: value` lines, one block per record, so a bare value keeps its field name (`status: create` rather than `create`, which reads like an instruction). Nested keys are dotted (`user.name: …`), list items are indexed (`items[0]: …`), and each line of a multi-line value keeps its prefix. A large list of only numbers collapses to `key: [N numbers]`. Keys are reviewed even when the value is a number, boolean, `None` or empty, because keys can carry injected text.
+
+The serialized text is split into chunks of at most `max_text_length` characters (lengths count UTF-16 code units, as in the TypeScript package). Neighbouring chunks overlap by up to 500 characters, so an injection cut at a chunk boundary still appears whole. All chunks are reviewed in parallel, and any blocking chunk blocks the result. `result.tier3_chunk_summary` reports `chunks`, `blocked` and `blocking_chunk`.
+
+**Oversize (`on_oversize`).** Up to about `max_chunks` chunks are reviewed per tool result. Content beyond that is oversize, and `tier3_chunk_summary.oversize` is set:
+- `"skip"` (default): review the content that fits and allow the rest. A fitting injection still blocks.
+- `"block"`: block without calling the provider (in strict mode).
+- `"scan_anyway"`: review what fits, then block on the unreviewed rest unless a chunk already blocked.
+
+A failed chunk is skipped (fail open). Then `result.tier3.errored` is `True`, `coverage_degraded` is `True`, and `result.tier3.note` says how many chunks failed. `note` also gives the reason for an `on_oversize` block when the provider allowed.
 
 **Choosing the operating point (`block_threshold`).** By default the model's `decision` word is authoritative — but that word is its argmax, an implicit 0.5 cut that moves on its own whenever the model is retrained. Set `tier3.block_threshold` to decide on `verdict.score` (P(block)) instead: the cut becomes an explicit config value — raise it to trade recall for fewer false positives, lower it for the reverse; `0.5` reproduces argmax. It requires a provider that reports `score` as P(block) (not "confidence in whichever decision I made" — those invert on allows). If `score` is missing or outside `[0, 1]` the verdict's `decision` is used instead and defender warns once, so a provider that cannot report a score degrades to the default rather than failing.
 
@@ -231,7 +244,8 @@ class DefenseResult:
     cold_load: bool | None = None
     # Operational signals
     tier2_available: bool | None = None       # False when Tier 2 enabled but failed to load
-    coverage_degraded: bool | None = None      # True when Tier 1 detection coverage was capped
+    coverage_degraded: bool | None = None      # True when Tier 1 detection or the Tier 3 review didn't cover everything
+    tier3_chunk_summary: Tier3ChunkSummary | None = None  # tier3_only: chunks, blocked, blocking_chunk, oversize
 ```
 
 ### `defense.defend_tool_results(items)`
@@ -324,6 +338,7 @@ Traps when porting from TypeScript (the fixtures pin TS behavior):
 - Lengths and slicing are in UTF-16 code units in TS, but `len()` counts code points.
 - TS `Object.entries` puts integer-like keys first. `json.loads` keeps insertion order.
 - Number rendering differs: `String(1.0)` is `"1"` but `str(1.0)` is `"1.0"`. Likewise `-0`, `1e-7` and `1e16` render differently in the two languages.
+- `core/tier3_input.py` handles the three traps above for Tier-3 input. It works on a UTF-16 view of each string, orders keys like `Object.entries`, and renders numbers like `String(n)`. One deliberate difference: Python ints below 1e21 print exactly, where JS would round past 2**53.
 - Python `re` has no `\p{Cf}`, and `unicodedata` versions differ across Python releases.
 - `str.splitlines()` also splits on `\x0b`, `\x0c` and `\x1c`, but TS splits only on `\r`, `\n`, `\u2028`, `\u2029` and `\u0085`.
 - JS `trim()` removes a BOM, but `str.strip()` doesn't.

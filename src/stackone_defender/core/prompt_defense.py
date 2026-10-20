@@ -29,6 +29,7 @@ from ..types import (
     RiskLevel,
     Tier1Result,
     Tier2Stats,
+    Tier3ChunkSummary,
     Tier3EscalationBand,
     Tier3Provider,
     Tier3Result,
@@ -38,6 +39,7 @@ from ..types import (
 )
 from ..utils.boundary import generate_data_boundary
 from .sentence_cleaner import clean_high_risk_content
+from .tier3_input import DEFAULT_MAX_CHUNKS, chunk_tier3_input, content_budget, format_records_for_tier3
 from .tool_result_sanitizer import ToolResultSanitizer, create_tool_result_sanitizer
 
 _logger = logging.getLogger(__name__)
@@ -48,6 +50,7 @@ _tier2_unavailable_warned = False
 
 _DEFAULT_TIER3_BAND = Tier3EscalationBand(lower=0.3, upper=0.85)
 _DEFAULT_TIER3_MAX_TEXT_LENGTH = 10000
+_TIER3_ON_OVERSIZE = ("skip", "block", "scan_anyway")
 
 
 @dataclass
@@ -154,27 +157,13 @@ def _extract_strings(
     return strings
 
 
-def _bounded_join_strings(strings: list[str], max_len: int, sep: str = "\n") -> str:
-    """Join strings with ``sep``, capping total length at ``max_len`` without building the full join first."""
-    if max_len <= 0:
-        return ""
-    parts: list[str] = []
-    used = 0
-    sep_len = len(sep)
-    for s in strings:
-        if not s:
-            continue
-        prefix = sep_len if parts else 0
-        if used + prefix >= max_len:
-            break
-        remaining = max_len - used - prefix
-        if len(s) <= remaining:
-            parts.append(s)
-            used += prefix + len(s)
-        else:
-            parts.append(s[:remaining])
-            break
-    return sep.join(parts)
+def _finite_at_least_one(v: Any) -> bool:
+    return (
+        isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and math.isfinite(v)
+        and math.floor(v) >= 1
+    )
 
 
 _RISK_LEVELS: list[RiskLevel] = ["low", "medium", "high", "critical"]
@@ -265,19 +254,43 @@ class PromptDefense:
         self._tier3_missing_provider_warned = False
         self._tier3_block_threshold: float | None = None
         self._tier3_missing_score_warned = False
+        self._tier3_on_oversize = "skip"
+        self._tier3_max_chunks = DEFAULT_MAX_CHUNKS
         tier3_opts = tier3 or {}
         if tier3_opts.get("provider") is not None:
             self._tier3_custom_provider = tier3_opts["provider"]
         max_text_length = tier3_opts.get("max_text_length", tier3_opts.get("maxTextLength"))
         if max_text_length is not None:
-            if isinstance(max_text_length, (int, float)) and math.isfinite(max_text_length) and max_text_length > 0:
-                self._tier3_max_text_length = int(max_text_length)
+            # Validate the floored value: a cap in (0, 1) floors to 0, which would disable Tier 3.
+            if _finite_at_least_one(max_text_length):
+                self._tier3_max_text_length = math.floor(max_text_length)
             else:
                 _logger.warning(
-                    "[defender] invalid tier3.max_text_length %s — must be a positive finite number. "
+                    "[defender] invalid tier3.max_text_length %s — must be a finite number >= 1. "
                     "Falling back to default %s.",
                     max_text_length,
                     _DEFAULT_TIER3_MAX_TEXT_LENGTH,
+                )
+        on_oversize = tier3_opts.get("on_oversize", tier3_opts.get("onOversize"))
+        if on_oversize is not None:
+            if on_oversize in _TIER3_ON_OVERSIZE:
+                self._tier3_on_oversize = on_oversize
+            else:
+                _logger.warning(
+                    '[defender] invalid tier3.on_oversize %r — must be "skip", "block", or "scan_anyway". '
+                    'Falling back to default "skip".',
+                    on_oversize,
+                )
+        max_chunks = tier3_opts.get("max_chunks", tier3_opts.get("maxChunks"))
+        if max_chunks is not None:
+            if _finite_at_least_one(max_chunks):
+                self._tier3_max_chunks = math.floor(max_chunks)
+            else:
+                _logger.warning(
+                    "[defender] invalid tier3.max_chunks %s — must be a finite number >= 1. "
+                    "Falling back to default %s.",
+                    max_chunks,
+                    DEFAULT_MAX_CHUNKS,
                 )
         escalation_band = tier3_opts.get("escalation_band", tier3_opts.get("escalationBand"))
         if escalation_band is not None:
@@ -533,55 +546,173 @@ class PromptDefense:
         )
         return risk_level, allowed
 
+    async def _review_tier3_chunk(self, provider: Tier3Provider, text: str, tool_name: str) -> Tier3Result:
+        try:
+            raw = await self._invoke_tier3_classify(provider, text, tool_name)
+        except Exception as e:
+            return Tier3Skip(skip_reason=f"Tier 3 provider error: {e}")
+        return self._validate_tier3_verdict(raw)
+
     async def _run_tier3_only(
         self,
         value: Any,
         provider: Tier3Provider,
         tool_name: str,
-        depth_flag: dict[str, bool],
+        depth_flag: dict[str, Any],
         start_time: float,
     ) -> DefenseResult:
-        strings = [s for s in _extract_strings(value, None, depth_flag) if len(s) > 0]
-        bounded = _bounded_join_strings(strings, self._tier3_max_text_length)
-
+        # ENG-2455: record-oriented `field: value` input, so bare values keep field context.
+        # ENG-1339: serialize up to a coverage ceiling, chunk it, and review every chunk in parallel
+        # (union of blocks) instead of truncating: a fixed truncation point is easy to evade.
         verdict: Tier3Verdict | None = None
         skip_reason: str | None = None
-        if len(bounded) == 0:
-            skip_reason = "No strings extracted from tool result"
+        # A policy block (on_oversize), as opposed to a chunk verdict block.
+        oversize_block = False
+        chunk_summary: Tier3ChunkSummary | None = None
+        # The payload couldn't be serialized: un-analyzable input fails closed in strict mode.
+        payload_error = False
+        chunk_failures = 0
+        chunk_total = 0
+        first_chunk_failure: str | None = None
+
+        per_chunk = self._tier3_max_text_length
+        # The ceiling uses the per-chunk content budget (minus the carried overlap), so the content
+        # typically fits in max_chunks chunks; the reviewer still sees <= per_chunk chars per call.
+        ceiling = self._tier3_max_chunks * content_budget(per_chunk)
+        joined = ""
+        try:
+            joined = format_records_for_tier3(value, depth_flag, ceiling, self._config.traversal.max_size)
+        except Exception as e:
+            payload_error = True
+            skip_reason = f"Tier 3 serialization error: {e}"
+        # A depth cut also hides content from the reviewer, so it counts as oversize.
+        oversize = depth_flag.get("budget_exceeded") is True or depth_flag["hit"] is True
+
+        if payload_error:
+            pass
+        elif oversize and self._tier3_on_oversize == "block":
+            # Checked before the empty case so "block" fails closed even when nothing fit.
+            oversize_block = True
+            depth_flag["coverage_degraded"] = True
+            skip_reason = (
+                f"Tool result too large to fully review (> {self._tier3_max_chunks} chunks) — blocked by onOversize"
+            )
+        elif not joined:
+            if oversize:
+                depth_flag["coverage_degraded"] = True
+            if oversize and self._tier3_on_oversize == "scan_anyway":
+                oversize_block = True
+                skip_reason = "Tool result too large to review — no content fit within the ceiling"
+            elif skip_reason is None:
+                skip_reason = (
+                    "Tool result too large to review — no content fit within the ceiling"
+                    if oversize
+                    else "No reviewable string content emitted from tool result"
+                )
         else:
-            try:
-                raw = await self._invoke_tier3_classify(provider, bounded, tool_name)
-                validated = self._validate_tier3_verdict(raw)
-                if isinstance(validated, Tier3Skip):
-                    skip_reason = validated.skip_reason
+            # Always review what fit, so a fitting injection is never dropped; on_oversize governs
+            # only the overflow.
+            chunks = chunk_tier3_input(joined, per_chunk)
+            results = await asyncio.gather(*(self._review_tier3_chunk(provider, c, tool_name) for c in chunks))
+            blocked_count = 0
+            blocking_chunk: int | None = None
+            reviewed = 0
+            for idx, res in enumerate(results):
+                if isinstance(res, Tier3Skip):
+                    chunk_failures += 1
+                    if first_chunk_failure is None:
+                        first_chunk_failure = res.skip_reason
+                    continue
+                reviewed += 1
+                is_block = self._is_tier3_block(res)
+                if is_block:
+                    blocked_count += 1
+                    if blocking_chunk is None:
+                        blocking_chunk = idx
+                # Representative: a blocker if any, else the highest-score allow.
+                if verdict is None:
+                    verdict = res
                 else:
-                    verdict = validated
-            except Exception as e:
-                skip_reason = f"Tier 3 provider error: {e}"
+                    rep_block = self._is_tier3_block(verdict)
+                    if (is_block and not rep_block) or (
+                        is_block == rep_block and (res.score or 0) > (verdict.score or 0)
+                    ):
+                        verdict = res
+            chunk_total = len(chunks)
+            chunk_summary = Tier3ChunkSummary(
+                chunks=chunk_total,
+                blocked=blocked_count,
+                blocking_chunk=blocking_chunk,
+                oversize=True if oversize else None,
+            )
+            if reviewed == 0:
+                # Every chunk failed: provider outage or bad verdicts. Fails open.
+                if skip_reason is None:
+                    skip_reason = first_chunk_failure or "Tier 3 skipped: no chunk produced a verdict"
+                depth_flag["coverage_degraded"] = True
+            elif chunk_failures > 0:
+                depth_flag["coverage_degraded"] = True
+            if oversize:
+                depth_flag["coverage_degraded"] = True
+                # The overflow went unreviewed: scan_anyway fails closed on it unless a chunk blocked.
+                if not (verdict is not None and self._is_tier3_block(verdict)) and self._tier3_on_oversize == "scan_anyway":
+                    oversize_block = True
+                    skip_reason = f"Tool result exceeds review ceiling; {chunk_total} chunks scanned, overflow unreviewed"
 
-        sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name)
-        detections, _tier1_flagged, prm = self._tier1_metadata(sanitized)
+        # Tier 1 runs for `detections` metadata only (the LLM decides in tier3_only). Its walk is
+        # uncapped, so a failure here degrades coverage but doesn't override a verdict.
+        patterns_by_field: dict[str, list[str]] = {}
+        detections: list[str] = []
+        sanitized_content: Any = value
+        analysis_degraded = False
+        try:
+            sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name)
+            detections, _tier1_flagged, patterns_by_field = self._tier1_metadata(sanitized)
+            sanitized_content = sanitized.sanitized
+            analysis_degraded = bool(self._coverage_degraded(sanitized.metadata, {"hit": False}))
+        except Exception as e:
+            analysis_degraded = True
+            if skip_reason is None:
+                skip_reason = f"Tier 1 metadata error: {e}"
 
-        blocked = verdict is not None and self._is_tier3_block(verdict)
-        risk_level: RiskLevel = "high" if blocked else "low"
-        allowed = not self._config.block_high_risk or not blocked
-        tier3_result: Tier3Result = (
-            verdict if verdict is not None else Tier3Skip(skip_reason=skip_reason or "Tier 3 skipped")
-        )
+        blocked = oversize_block or (verdict is not None and self._is_tier3_block(verdict))
+        risk_level: RiskLevel = "high" if blocked or payload_error else "low"
+        # block_high_risk=False always allows; strict mode fails closed on a payload error.
+        allowed = not self._config.block_high_risk or (not blocked and not payload_error)
+
+        errored = True if chunk_failures > 0 else None
+        tier3_result: Tier3Result
+        if verdict is not None:
+            # skip_reason isn't reported with a verdict, so say why the outcome isn't the verdict's alone.
+            notes: list[str] = []
+            if oversize_block and skip_reason:
+                notes.append(skip_reason)
+            if chunk_failures > 0:
+                failed = f"{chunk_failures} of {chunk_total} chunks failed"
+                notes.append(f"{failed}: {first_chunk_failure}" if first_chunk_failure else failed)
+            tier3_result = replace(verdict, errored=errored, note="; ".join(notes) or None)
+        else:
+            tier3_result = Tier3Skip(skip_reason=skip_reason or "Tier 3 skipped", errored=errored)
 
         return DefenseResult(
             allowed=allowed,
             risk_level=risk_level,
-            sanitized=sanitized.sanitized,
+            sanitized=sanitized_content,
             detections=detections,
             fields_sanitized=[],
-            patterns_by_field=prm,
-            detected_field_count=len(prm),
+            patterns_by_field=patterns_by_field,
+            detected_field_count=len(patterns_by_field),
             tier3=tier3_result,
             fields_dropped=[],
+            # The depth-limit signal only; budget drops set coverage_degraded.
             truncated_at_depth=depth_flag["hit"] or None,
             latency_ms=(time.perf_counter() - start_time) * 1000,
-            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag),
+            coverage_degraded=(
+                True
+                if depth_flag["hit"] or depth_flag.get("coverage_degraded") or analysis_degraded or payload_error
+                else None
+            ),
+            tier3_chunk_summary=chunk_summary,
         )
 
     def defend_tool_result(self, value: Any, tool_name: str) -> DefenseResult:

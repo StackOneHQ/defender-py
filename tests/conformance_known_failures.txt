@@ -2,39 +2,6 @@
 # tests/test_conformance.py: when a port makes one pass, remove its line (the XPASS fails the run).
 # Format: <area>/<case-id>  # <why / which ticket fixes it>
 
-## Tier-3 serialization and chunking
-tier3-serialize/array-summary-threshold  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/array-summary-values-label  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/astral-heavy-chunking  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/chunked-with-overlap  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/empty-key-not-bare  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/empty-string-value-keeps-key  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/empty-value-key-next-to-string  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/empty-values-keep-keys  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/flat-record-field-context  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/index-only-scalars-skip  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/integer-like-keys-ordered  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/keyed-scalars-free-text-keys  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/large-numeric-array-collapsed  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/line-breaks-all-kinds  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/literal-index-looking-key  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/long-line-no-spaces  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/multiline-value-each-line-prefixed  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/nested-keys-dotted  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/nested-list-is-one-record  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/newline-in-key-flattened  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/null-value-keeps-key  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/number-formats  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/oversize-skip-flags-coverage  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/records-blank-line-separated  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/scalar-only-keys-reviewed  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/scalar-types  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/single-long-line-split-with-overlap  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/string-after-large-array-reviewed  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/top-level-array-of-primitives-indexed  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/top-level-string  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-serialize/unicode-and-astral  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-
 ## Prompt rendering (not ported)
 tier3-prompt/blank-lines-in-content-kept  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): prompt + parser
 tier3-prompt/custom-template  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): prompt + parser
@@ -115,28 +82,16 @@ tier3-policy/cascade-error-default-keeps-tier2-block  # ENG-3500 phase 2 (ENG-34
 tier3-policy/cascade-max-tier2-score-permits  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/cascade-max-tier2-score-suppresses  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/cascade-missing-provider-block  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
-tier3-policy/t3only-allow  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-policy/t3only-block  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-policy/t3only-block-threshold-on-score  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
 tier3-policy/t3only-decide-allow-overrides-block  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-decide-cannot-override-oversize  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-decide-throw-uses-options  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-error-block-fails-closed  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-error-block-permissive-allows  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
-tier3-policy/t3only-error-default-fails-open  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-include-raw-false  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-invalid-decision-not-echoed  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
-tier3-policy/t3only-invalid-score-dropped  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
-tier3-policy/t3only-keyed-scalar-injection  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound); LIVE GAP: allows unreviewed content
-tier3-policy/t3only-late-chunk-block  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound); LIVE GAP: allows unreviewed content
-tier3-policy/t3only-meta-fields-stripped  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
 tier3-policy/t3only-no-provider-block-fails-closed  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-one-chunk-fails-block  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
-tier3-policy/t3only-one-chunk-fails-default  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
-tier3-policy/t3only-oversize-error-block-defaults-scan-anyway  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound); LIVE GAP: allows unreviewed content
-tier3-policy/t3only-oversize-scan-anyway-blocks  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound); LIVE GAP: allows unreviewed content
+tier3-policy/t3only-oversize-error-block-defaults-scan-anyway  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-refused-blocks-even-if-allow  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options; LIVE GAP: a refused 'allow' passes
-tier3-policy/t3only-score-equals-threshold-blocks  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
-tier3-policy/t3only-stop-on-first-block  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)
+tier3-policy/t3only-stop-on-first-block  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
 tier3-policy/t3only-stop-on-first-block-decide-allow  # ENG-3500 phase 2 (ENG-3495 BYO-LLM): policy options
-tier3-policy/t3only-two-chunks-block  # ENG-3500 phase 1 (ENG-2455 records, ENG-1339 chunking, ENG-2530 bound)

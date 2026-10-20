@@ -90,6 +90,10 @@ class Tier3Verdict:
     raw: Any = None
     latency_ms: float | None = None
     usage: Tier3TokenUsage | None = None
+    # Set by the defender, never by a provider. True when some tier3_only chunk failed.
+    errored: bool | None = None
+    # Why the outcome isn't this verdict's alone (an oversize policy block, failed chunks).
+    note: str | None = None
 
 
 @dataclass
@@ -97,6 +101,8 @@ class Tier3Skip:
     """Tier 3 was invoked but did not return a usable verdict."""
 
     skip_reason: str
+    # True when tier3_only chunks were sent but none produced a verdict.
+    errored: bool | None = None
 
 
 Tier3Result = Tier3Verdict | Tier3Skip
@@ -322,6 +328,17 @@ class Tier2Stats:
 
 
 @dataclass
+class Tier3ChunkSummary:
+    """The tier3_only chunk review: chunks reviewed in parallel, how many blocked, the first
+    blocking index, and whether content exceeded the coverage ceiling (``on_oversize`` applied)."""
+
+    chunks: int
+    blocked: int
+    blocking_chunk: int | None = None
+    oversize: bool | None = None
+
+
+@dataclass
 class DefenseResult:
     """Outcome of ``defend_tool_result`` (Tier 1 sanitize + optional Tier 2 + SFE metadata).
 
@@ -381,5 +398,8 @@ class DefenseResult:
     # True when Tier 1 detection coverage was reduced on this call — the call-scoped
     # max_size detection budget or a depth limit was hit, or a field exceeded the
     # analysis cap. Content is still returned in full and Tier 2 (when enabled) still
-    # scanned every string. None (not False) when coverage was complete — branch on `is True`.
+    # scanned every string. In tier3_only, also set when reviewer input was cut or dropped for the
+    # review budget, or a chunk failed. None (not False) when coverage was complete — branch on `is True`.
     coverage_degraded: bool | None = None
+    # Present only when the tier3_only chunk review ran.
+    tier3_chunk_summary: Tier3ChunkSummary | None = None
