@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.2...stackone-defender-v0.9.3) (2026-10-20)
+
+
+### Bug Fixes
+
+* **ENG-3282:** swap the Tier-2 model and recalibrate its threshold ([#44](https://github.com/StackOneHQ/defender-py/issues/44)) ([5fd8f87](https://github.com/StackOneHQ/defender-py/commit/5fd8f8748bcc72a42324b5fba09d90465b062135))
+
 ## [0.9.2](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.1...stackone-defender-v0.9.2) (2026-10-20)
 
 
