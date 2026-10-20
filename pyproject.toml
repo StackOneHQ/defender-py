@@ -20,8 +20,10 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/StackOneHQ/stackone-defender"
-Repository = "https://github.com/StackOneHQ/stackone-defender"
+Homepage = "https://defender.stackone.com/?utm_source=pypi&utm_medium=listing&utm_campaign=homepage"
+Repository = "https://github.com/StackOneHQ/defender-py"
+Issues = "https://github.com/StackOneHQ/defender-py/issues"
+Changelog = "https://github.com/StackOneHQ/defender-py/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 onnx = ["onnxruntime>=1.16.0", "tokenizers>=0.15.0", "numpy>=1.24.0"]
