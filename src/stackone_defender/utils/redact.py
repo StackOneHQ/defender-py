@@ -37,11 +37,11 @@ _RULES: list[tuple[re.Pattern[str], str]] = [
     # Bearer/Basic are always followed by a credential. "Token"/"Digest" are also ordinary words, so
     # they need a credential-shaped value.
     # A quoted value whole, else stop at a quote or comma so the next pair in a dict repr stays matchable.
-    # An unquoted value runs to the next whitespace or comma, but leaves a closing quote that ends it.
+    # An unquoted value runs to the next whitespace or comma, but leaves a closing quote right before one.
     (
         re.compile(
             rf"\b(Bearer|Basic){_S}+(?:\"(?:[^\"\\]|\\{_DOT})*\"?|'(?:[^'\\]|\\{_DOT})*'?"
-            rf"|[^{JS_WS},'\"](?:[^{JS_WS},]*?(?=['\"]?(?:[{JS_WS},}}\])]|\Z))|[^{JS_WS},]*))",
+            rf"|[^{JS_WS},'\"](?:[^{JS_WS},]*?(?=['\"]?(?:[{JS_WS},]|\Z))|[^{JS_WS},]*))",
             _AI,
         ),
         r"\1 [redacted]",

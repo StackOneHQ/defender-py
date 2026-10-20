@@ -518,6 +518,8 @@ class TestRedactionRegressions:
             ("auth failed: Bearer 'abcdefghijklmnop'", "abcdefghijklmnop"),
             ('auth failed: Basic "dXNlcjpwYXNzd29yZA=="', "dXNlcjpwYXNzd29yZA"),
             ("auth failed: Bearer abc'defghijk rest", "defghijk"),
+            ("auth failed: Bearer abc}secretvalue12 rest", "secretvalue12"),
+            ("auth failed: Basic xyz)moresecret34", "moresecret34"),
             ("auth failed: Bearer 'abc\\'defghijk' tail", "defghijk"),
             ('auth failed: Basic "abc\\"defghijk" tail', "defghijk"),
         ],
