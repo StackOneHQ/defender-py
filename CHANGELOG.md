@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.2](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.1...stackone-defender-v0.9.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* **ENG-3282:** store model binaries in Git LFS, with pointer guards ([#41](https://github.com/StackOneHQ/defender-py/issues/41)) ([95d5d41](https://github.com/StackOneHQ/defender-py/commit/95d5d412222d248b5ba1132b7a51f7a133a6717a))
+
+
+### Documentation
+
+* **ENG-3500:** refresh the README against the 0.9.1 code ([#42](https://github.com/StackOneHQ/defender-py/issues/42)) ([24ac6e6](https://github.com/StackOneHQ/defender-py/commit/24ac6e6dcbec852156162467b6585d6b7e6646aa))
+
 ## [0.9.1](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.0...stackone-defender-v0.9.1) (2026-10-20)
 
 
