@@ -36,8 +36,8 @@ _RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(rf"\b([a-z][a-z0-9+.-]*)://(?:[^/{JS_WS}?#]*@)?([^/@{JS_WS}?#]+){_NS}*", _AI), r"\1://\2"),
     # Bearer/Basic are always followed by a credential. "Token"/"Digest" are also ordinary words, so
     # they need a credential-shaped value.
-    # Stop at a quote or comma, so the next pair in a dict repr stays matchable.
-    (re.compile(rf"\b(Bearer|Basic){_S}+[^{JS_WS}'\",]+", _AI), r"\1 [redacted]"),
+    # A quoted value whole, else stop at a quote or comma so the next pair in a dict repr stays matchable.
+    (re.compile(rf"\b(Bearer|Basic){_S}+(?:\"[^\"]*\"?|'[^']*'?|[^{JS_WS}'\",]+)", _AI), r"\1 [redacted]"),
     (re.compile(rf"\b(Token|Digest){_S}+{_CREDENTIAL}", _AI), r"\1 [redacted]"),
     (
         re.compile(rf"\b(authorization|proxy-authorization)({_S}*[:=]{_S}*)(?:[A-Za-z]+{_S}+)?{_CREDENTIAL}", _AI),

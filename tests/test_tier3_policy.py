@@ -515,6 +515,8 @@ class TestRedactionRegressions:
                 "Headers({'authorization': 'Bearer sk-live-abcdef12345', 'api-key': 'k3y-with-dashes'})",
                 "k3y-with-dashes",
             ),
+            ("auth failed: Bearer 'abcdefghijklmnop'", "abcdefghijklmnop"),
+            ('auth failed: Basic "dXNlcjpwYXNzd29yZA=="', "dXNlcjpwYXNzd29yZA"),
         ],
     )
     def test_no_leak(self, text, secret):
