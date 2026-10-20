@@ -19,13 +19,13 @@ from decimal import Decimal
 from typing import Any
 
 from ..config import MAX_TRAVERSAL_DEPTH
+from ..utils.text import from_utf16, safe_end, safe_start, to_utf16
+from ..utils.text import utf16_len as _utf16_len
 
 # Line breaks (incl. U+2028/U+2029/NEL): flattened in keys, split in values, so neither can
 # forge a bare line or a `\n\n` record boundary.
 _LINE_BREAKS = re.compile("[\r\n\u2028\u2029\u0085]")
 _LINE_BREAKS_RUN = re.compile("[\r\n\u2028\u2029\u0085]+")
-_ASTRAL = re.compile("[\U00010000-\U0010ffff]")
-_SURROGATE = re.compile("[\ud800-\udfff]")
 _INDEX_KEY = re.compile(r"(?:0|[1-9][0-9]*)")
 _MAX_ARRAY_INDEX = 2**32 - 2
 
@@ -39,55 +39,6 @@ CHUNK_OVERLAP_CHARS = 500
 DEFAULT_MAX_CHUNKS = 5
 
 _BINARY = (bytes, bytearray, memoryview)
-
-
-# --- UTF-16 view -----------------------------------------------------------------------------
-
-
-def _pair(m: re.Match[str]) -> str:
-    c = ord(m[0]) - 0x10000
-    return chr(0xD800 + (c >> 10)) + chr(0xDC00 + (c & 0x3FF))
-
-
-def to_utf16(s: str) -> str:
-    """``s`` with astral characters split into surrogate pairs, so ``len`` and slicing match JS."""
-    return _ASTRAL.sub(_pair, s) if _ASTRAL.search(s) else s
-
-
-def from_utf16(s: str) -> str:
-    """Join surrogate pairs back into characters. An unpaired surrogate becomes U+FFFD, so a
-    provider that encodes to UTF-8 can't be made to fail (and fail open) by one."""
-    if not _SURROGATE.search(s):
-        return s
-    return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
-
-
-def _utf16_len(s: str) -> int:
-    if not _ASTRAL.search(s):
-        return len(s)
-    return len(s.encode("utf-16-le", "surrogatepass")) // 2
-
-
-def _is_high(c: str) -> bool:
-    return "\ud800" <= c <= "\udbff"
-
-
-def _is_low(c: str) -> bool:
-    return "\udc00" <= c <= "\udfff"
-
-
-def safe_end(s: str, end: int) -> int:
-    """An end index <= ``end`` that doesn't split a surrogate pair."""
-    if 0 < end < len(s) and _is_high(s[end - 1]) and _is_low(s[end]):
-        return end - 1
-    return end
-
-
-def safe_start(s: str, start: int) -> int:
-    """A start index >= ``start`` that doesn't split a surrogate pair."""
-    if 0 < start < len(s) and _is_low(s[start]) and _is_high(s[start - 1]):
-        return start + 1
-    return start
 
 
 # --- JS value semantics ----------------------------------------------------------------------

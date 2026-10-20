@@ -90,10 +90,23 @@ class Tier3Verdict:
     raw: Any = None
     latency_ms: float | None = None
     usage: Tier3TokenUsage | None = None
-    # Set by the defender, never by a provider. True when some tier3_only chunk failed.
+    # Model explanation. Untrusted: it can quote attacker text. Never feed it back to an agent.
+    reason: str | None = None
+    # The model refused, a content filter fired, or the reply was unusable. ``decision`` is then "block".
+    refused: bool | None = None
+    # Prompt version of a create_llm_tier3_provider provider ("custom" for a user prompt).
+    prompt_version: str | None = None
+    # The fields below are set by the defender, never by a provider.
+    # A real Tier 3 failure: some tier3_only chunk failed, or the cascade call failed.
     errored: bool | None = None
-    # Why the outcome isn't this verdict's alone (an oversize policy block, failed chunks).
+    # Why the outcome isn't this verdict's alone (an oversize policy block, failed chunks). Redacted.
     note: str | None = None
+    # Cascade: the allow removed a Tier-2 threat.
+    override_applied: bool | None = None
+    # Cascade: the allow was ignored because of allow_override.
+    override_suppressed: bool | None = None
+    # Which policy produced the Tier 3 outcome: "policy" (tier3.decide) or "options".
+    decided_by: Literal["policy", "options"] | None = None
 
 
 @dataclass
@@ -101,8 +114,13 @@ class Tier3Skip:
     """Tier 3 was invoked but did not return a usable verdict."""
 
     skip_reason: str
-    # True when tier3_only chunks were sent but none produced a verdict.
+    # A real Tier 3 failure (not a planned skip).
     errored: bool | None = None
+    # Cascade: on_error="allow" (or tier3.decide) removed a Tier-2 threat.
+    override_applied: bool | None = None
+    # Cascade: the allow was ignored because of allow_override.
+    override_suppressed: bool | None = None
+    decided_by: Literal["policy", "options"] | None = None
 
 
 Tier3Result = Tier3Verdict | Tier3Skip
@@ -111,6 +129,68 @@ Tier3Result = Tier3Verdict | Tier3Skip
 Tier3ClassifyResult = (
     Tier3Verdict | dict[str, Any] | Awaitable[Tier3Verdict | dict[str, Any]]
 )
+
+
+@dataclass(frozen=True)
+class Tier3ChunkRef:
+    index: int
+    total: int
+
+
+@dataclass(frozen=True)
+class Tier3Event:
+    """Emitted to ``tier3.on_event`` once per provider call (or missing provider). No content."""
+
+    kind: Literal["verdict", "refusal", "error", "timeout", "missing_provider", "policy_error"]
+    mode: DefenderMode
+    chunk: Tier3ChunkRef | None = None
+    latency_ms: float | None = None
+    usage: Tier3TokenUsage | None = None
+    # Short, redacted error text. Never includes content, ``reason`` or ``raw``.
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class Tier3DecisionTier1:
+    detected: bool
+    risk_level: RiskLevel
+
+
+@dataclass(frozen=True)
+class Tier3DecisionTier2:
+    would_block: bool  # whether Tier 2 alone would block this payload
+    score: float  # top-chunk score before density damping
+    effective_score: float  # score used for escalation and blocking
+    multihead: bool
+    aux_score: float | None = None
+
+
+@dataclass(frozen=True)
+class Tier3DecisionRan:
+    decision: Tier3Decision
+    refused: bool
+    score: float | None = None
+    # tier3_only: chunks that failed or were aborted by stop_on_first_block.
+    unreviewed_chunks: int | None = None
+    ran: Literal[True] = True
+
+
+@dataclass(frozen=True)
+class Tier3DecisionNotRan:
+    errored: bool
+    skip_reason: str
+    ran: Literal[False] = False
+
+
+@dataclass(frozen=True)
+class Tier3DecisionInput:
+    """Input to ``tier3.decide``. Metadata only: never content, ``reason`` or ``raw``."""
+
+    mode: DefenderMode
+    tier1: Tier3DecisionTier1
+    tier3: Tier3DecisionRan | Tier3DecisionNotRan
+    tier2: Tier3DecisionTier2 | None = None
+    tool_name: str | None = None
 
 
 @dataclass
@@ -129,7 +209,13 @@ class Tier3Provider(Protocol):
         *,
         ctx: dict[str, Any] | None = None,
     ) -> Tier3ClassifyResult:
-        """Classify text for prompt-injection risk (sync or awaitable)."""
+        """Classify text for prompt-injection risk (sync or awaitable).
+
+        ``ctx`` keys: ``tool_name`` (also ``toolName``), ``mode``, ``chunk`` (``{"index", "total"}``
+        in tier3_only), ``user_goal`` and ``tool_description`` (untrusted caller context), and
+        ``deadline`` (``time.time()`` seconds, when ``tier3.timeout_ms`` is set). An async provider
+        is cancelled at the deadline; a sync one can't be interrupted.
+        """
         ...
 
 

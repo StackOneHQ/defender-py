@@ -28,6 +28,8 @@ onnx = ["onnxruntime>=1.16.0", "tokenizers>=0.15.0", "numpy>=1.24.0"]
 # fasttext-ng provides the `fasttext` module (maintained bindings; supports 3.13).
 # Pulls numpy>=2.3; SFE still fail-opens when import/load fails.
 sfe = ["fasttext-ng>=0.9.3"]
+# create_openai_compatible_tier3_provider (Tier 3 over any OpenAI-compatible endpoint).
+llm = ["httpx>=0.27"]
 
 [dependency-groups]
 dev = [
@@ -38,6 +40,7 @@ dev = [
   "tokenizers>=0.15.0",
   "numpy>=1.24.0",
   "fasttext-ng>=0.9.3",
+  "httpx>=0.27",
 ]
 
 [build-system]

@@ -7,10 +7,10 @@ Provides a simple API for defending tool results against prompt injection.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -30,16 +30,24 @@ from ..types import (
     Tier1Result,
     Tier2Stats,
     Tier3ChunkSummary,
+    Tier3DecisionInput,
+    Tier3DecisionNotRan,
+    Tier3DecisionRan,
+    Tier3DecisionTier1,
+    Tier3DecisionTier2,
     Tier3EscalationBand,
+    Tier3Event,
     Tier3Provider,
     Tier3Result,
     Tier3Skip,
-    Tier3TokenUsage,
     Tier3Verdict,
 )
 from ..utils.boundary import generate_data_boundary
+from ..utils.redact import describe_error, redact_error_text
+from ..utils.text import truncate
 from .sentence_cleaner import clean_high_risk_content
 from .tier3_input import DEFAULT_MAX_CHUNKS, chunk_tier3_input, content_budget, format_records_for_tier3
+from .tier3_policy import MISSING_PROVIDER, Tier3Policy
 from .tool_result_sanitizer import ToolResultSanitizer, create_tool_result_sanitizer
 
 _logger = logging.getLogger(__name__)
@@ -157,6 +165,18 @@ def _extract_strings(
     return strings
 
 
+def _caller_context(context: Mapping[str, Any] | None) -> dict[str, str]:
+    """Copy only the caller-context fields, so a caller dict can't overwrite tool_name, mode or chunk."""
+    if not context:
+        return {}
+    out = {}
+    for snake, camel in (("user_goal", "userGoal"), ("tool_description", "toolDescription")):
+        v = context.get(snake, context.get(camel))
+        if isinstance(v, str):
+            out[snake] = v
+    return out
+
+
 def _finite_at_least_one(v: Any) -> bool:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return False
@@ -256,6 +276,7 @@ class PromptDefense:
         self._tier3_on_oversize = "skip"
         self._tier3_max_chunks = DEFAULT_MAX_CHUNKS
         tier3_opts = tier3 or {}
+        on_oversize_explicit = False
         if tier3_opts.get("provider") is not None:
             self._tier3_custom_provider = tier3_opts["provider"]
         max_text_length = tier3_opts.get("max_text_length", tier3_opts.get("maxTextLength"))
@@ -274,6 +295,7 @@ class PromptDefense:
         if on_oversize is not None:
             if on_oversize in _TIER3_ON_OVERSIZE:
                 self._tier3_on_oversize = on_oversize
+                on_oversize_explicit = True
             else:
                 _logger.warning(
                     '[defender] invalid tier3.on_oversize %r — must be "skip", "block", or "scan_anyway". '
@@ -325,6 +347,10 @@ class PromptDefense:
                     "Falling back to the provider's decision.",
                     block_threshold,
                 )
+        self._t3 = Tier3Policy(tier3_opts, self._defender_mode, self._tier3_block_threshold)
+        # on_error="block" in tier3_only closes the oversize door too, unless on_oversize was chosen.
+        if self._t3.on_error == "block" and self._defender_mode == "tier3_only" and not on_oversize_explicit:
+            self._tier3_on_oversize = "scan_anyway"
 
     def warmup_tier2(self) -> None:
         if self._tier2:
@@ -375,96 +401,6 @@ class PromptDefense:
         return self._tier3_custom_provider or get_default_tier3_provider()
 
     @staticmethod
-    def _parse_tier3_usage(usage: Any) -> Tier3TokenUsage | None:
-        if usage is None or not isinstance(usage, dict):
-            return None
-        prompt_tokens = usage.get("prompt_tokens", usage.get("promptTokens"))
-        completion_tokens = usage.get("completion_tokens", usage.get("completionTokens"))
-        total_tokens = usage.get("total_tokens", usage.get("totalTokens"))
-        if not all(isinstance(value, int) for value in (prompt_tokens, completion_tokens, total_tokens)):
-            return None
-        return Tier3TokenUsage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-        )
-
-    @staticmethod
-    def _normalize_tier3_score(score: Any) -> float | None:
-        # Public contract is score in [0, 1]; drop anything else (wrong type,
-        # non-finite, out of range) rather than leak it to consumers or the
-        # block gate. bool is excluded since it is not a numeric score.
-        if isinstance(score, bool) or not isinstance(score, (int, float)):
-            return None
-        if not math.isfinite(score) or score < 0 or score > 1:
-            return None
-        return float(score)
-
-    @staticmethod
-    def _validate_tier3_verdict(verdict: Any) -> Tier3Verdict | Tier3Skip:
-        if isinstance(verdict, Tier3Verdict):
-            if verdict.decision in ("block", "allow"):
-                # errored/note are set by the defender, never by a provider.
-                return replace(
-                    verdict, score=PromptDefense._normalize_tier3_score(verdict.score), errored=None, note=None
-                )
-            return Tier3Skip(
-                skip_reason=(
-                    f'Tier 3 provider returned invalid decision: {verdict.decision!r} '
-                    '(expected "block" | "allow")'
-                )
-            )
-        if verdict is None or not isinstance(verdict, dict):
-            return Tier3Skip(
-                skip_reason=f"Tier 3 provider returned non-object verdict: {type(verdict).__name__}"
-            )
-        decision = verdict.get("decision")
-        if decision not in ("block", "allow"):
-            return Tier3Skip(
-                skip_reason=f'Tier 3 provider returned invalid decision: {decision!r} (expected "block" | "allow")'
-            )
-        return Tier3Verdict(
-            decision=decision,
-            score=PromptDefense._normalize_tier3_score(verdict.get("score")),
-            raw=verdict.get("raw"),
-            latency_ms=verdict.get("latency_ms", verdict.get("latencyMs")),
-            usage=PromptDefense._parse_tier3_usage(verdict.get("usage")),
-        )
-
-    def _is_tier3_block(self, verdict: Tier3Verdict) -> bool:
-        """Resolve a validated verdict to block/allow.
-
-        With ``block_threshold`` unset this is the model's ``decision`` (its
-        argmax, an implicit 0.5 cut). With a threshold set we decide on ``score``
-        (P(block)) instead, which is what makes any other operating point
-        reachable. A threshold with no usable score falls back to ``decision``
-        (warned once) rather than taking the tier offline.
-        """
-        if self._tier3_block_threshold is None:
-            return verdict.decision == "block"
-        # Validation already dropped any score outside [0, 1], so a non-None
-        # score here is usable as P(block).
-        if verdict.score is not None:
-            return verdict.score >= self._tier3_block_threshold
-        if not self._tier3_missing_score_warned:
-            self._tier3_missing_score_warned = True
-            _logger.warning(
-                "[defender] tier3.block_threshold=%s is set but the provider did not report a usable "
-                "score (missing, or not a number in [0, 1]). Falling back to the provider's decision — "
-                "the threshold is not being applied.",
-                self._tier3_block_threshold,
-            )
-        return verdict.decision == "block"
-
-    @staticmethod
-    async def _invoke_tier3_classify(provider: Tier3Provider, text: str, tool_name: str) -> Any:
-        ctx = {"toolName": tool_name}
-        result = provider.classify(text, ctx=ctx)
-        if inspect.isawaitable(result):
-            return await result
-        return result
-
-    @staticmethod
     def _tier1_metadata(sanitized) -> tuple[list[str], list[str], dict]:
         prm = sanitized.metadata.patterns_removed_by_field
         mbf = sanitized.metadata.methods_by_field
@@ -476,12 +412,26 @@ class PromptDefense:
         ]
         return detections, fields_sanitized, prm
 
+
+    @staticmethod
+    def _tier3_ctx(tool_name: str, mode: DefenderMode, caller: Mapping[str, str]) -> dict[str, Any]:
+        # `toolName` is kept for providers written against 0.8.x.
+        return {**caller, "tool_name": tool_name, "toolName": tool_name, "mode": mode}
+
     async def _maybe_tier3_cascade(
         self,
         tier2: _Tier2Outcome,
         tool_name: str,
+        caller: Mapping[str, str],
+        *,
+        tier2_has_threat: bool,
+        tier2_idx: int,
+        tier1_detected: bool,
+        tier1_risk: RiskLevel,
     ) -> tuple[Tier3Result | None, bool | None]:
-        """Run Tier 3 cascade escalation when Tier 2 score is in the gray band."""
+        """Cascade escalation: when Tier 2's effective score is in the band, ask Tier 3 about the
+        chunk that drove it. Returns the Tier 3 result and the override: True adds a block, False
+        removes the Tier 2 threat, None keeps Tier 2's verdict."""
         if not (self._tier3_enabled and self._defender_mode == "cascade"):
             return None, None
         eff = tier2.effective_score
@@ -489,31 +439,86 @@ class PromptDefense:
             return None, None
         if eff < self._tier3_band.lower or eff >= self._tier3_band.upper:
             return None, None
-
+        t3 = self._t3
         provider = self._resolve_tier3_provider()
-        if provider is None:
+        outcome = None
+        if provider is not None:
+            t3.warn_if_risky_override(provider)
+            bounded = truncate(tier2.max_sentence, self._tier3_max_text_length)
+            outcome = await t3.call(provider, bounded, self._tier3_ctx(tool_name, "cascade", caller))
+        else:
             if not self._tier3_missing_provider_warned:
                 self._tier3_missing_provider_warned = True
                 _logger.warning(
                     "[defender] enable_tier3=true but no Tier 3 provider is registered. "
                     "Cascade will skip Tier 3 escalation. Call set_default_tier3_provider() at app startup."
                 )
-            return Tier3Skip(skip_reason="No Tier 3 provider registered"), None
+            t3.emit(Tier3Event(kind="missing_provider", mode="cascade"))
+        verdict = outcome.verdict if outcome is not None and outcome.kind == "verdict" else None
+        # A missing provider is a failure only when the operator asked to fail closed.
+        failed = (outcome is not None and outcome.kind == "failed") or (outcome is None and t3.on_error == "block")
+        if outcome is not None and outcome.kind == "failed":
+            skip_reason = outcome.skip_reason or "Tier 3 skipped"
+        else:
+            skip_reason = "No Tier 3 provider registered" if outcome is None else "Tier 3 skipped"
+        meta: dict[str, Any] = {"errored": True} if failed else {}
+        tier2_score = tier2.raw_score if tier2.raw_score is not None else eff
 
-        max_sentence = tier2.max_sentence
-        bounded = (
-            max_sentence[: self._tier3_max_text_length]
-            if len(max_sentence) > self._tier3_max_text_length
-            else max_sentence
+        ask: str | None = None
+        via_policy = False
+        if t3.decide is not None:
+            d = t3.run_decide(
+                Tier3DecisionInput(
+                    mode="cascade",
+                    tier1=Tier3DecisionTier1(detected=tier1_detected, risk_level=tier1_risk),
+                    tier2=Tier3DecisionTier2(
+                        would_block=tier2_has_threat,
+                        score=tier2_score,
+                        effective_score=eff,
+                        multihead=tier2.multihead_blocked is not None,
+                        aux_score=tier2.aux_score,
+                    ),
+                    tier3=(
+                        Tier3DecisionRan(
+                            decision="block" if t3.is_block(verdict) else "allow",
+                            refused=verdict.refused is True,
+                            score=verdict.score,
+                        )
+                        if verdict is not None
+                        else Tier3DecisionNotRan(errored=failed, skip_reason=skip_reason)
+                    ),
+                    tool_name=tool_name,
+                )
+            )
+            via_policy = d != "default"
+            if via_policy:
+                ask = d
+            meta["decided_by"] = "policy" if via_policy else "options"
+        if not via_policy:
+            if verdict is not None:
+                ask = "block" if t3.is_block(verdict) else "allow"
+            elif failed:
+                on_error = t3.on_error or "tier2"
+                if on_error == "allow":
+                    ask = "allow"
+                # Fail closed only on payloads Tier 2 already flagged, so an outage can't block the band.
+                elif on_error == "block" and tier2_idx >= _RISK_LEVELS.index("medium"):
+                    ask = "block"
+        override_block: bool | None = None
+        if ask == "block":
+            override_block = True
+        elif ask == "allow":
+            if not tier2_has_threat:
+                override_block = False
+            elif via_policy or t3.override_permitted(tier2_score):
+                override_block = False
+                meta["override_applied"] = True
+            else:
+                meta["override_suppressed"] = True
+        result: Tier3Result = (
+            replace(verdict, **meta) if verdict is not None else Tier3Skip(skip_reason=skip_reason, **meta)
         )
-        try:
-            raw = await self._invoke_tier3_classify(provider, bounded, tool_name)
-            validated = self._validate_tier3_verdict(raw)
-            if isinstance(validated, Tier3Skip):
-                return validated, None
-            return validated, self._is_tier3_block(validated)
-        except Exception as e:
-            return Tier3Skip(skip_reason=f"Tier 3 provider error: {e}"), None
+        return result, override_block
 
     @staticmethod
     def _finalize_allowed_and_risk(
@@ -548,18 +553,6 @@ class PromptDefense:
         )
         return risk_level, allowed
 
-    async def _review_tier3_chunk(self, provider: Tier3Provider, text: str, tool_name: str) -> Tier3Result:
-        try:
-            raw = await self._invoke_tier3_classify(provider, text, tool_name)
-        except asyncio.CancelledError as e:
-            # Our own task being cancelled must propagate; a provider's internal cancel is a chunk failure.
-            task = asyncio.current_task()
-            if task is not None and task.cancelling():
-                raise
-            return Tier3Skip(skip_reason=f"Tier 3 provider error: cancelled {e}".rstrip())
-        except Exception as e:
-            return Tier3Skip(skip_reason=f"Tier 3 provider error: {e}")
-        return self._validate_tier3_verdict(raw)
 
     async def _run_tier3_only(
         self,
@@ -568,10 +561,12 @@ class PromptDefense:
         tool_name: str,
         depth_flag: dict[str, Any],
         start_time: float,
+        caller: Mapping[str, str],
     ) -> DefenseResult:
         # ENG-2455: record-oriented `field: value` input, so bare values keep field context.
         # ENG-1339: serialize up to a coverage ceiling, chunk it, and review every chunk in parallel
         # (union of blocks) instead of truncating: a fixed truncation point is easy to evade.
+        t3 = self._t3
         verdict: Tier3Verdict | None = None
         skip_reason: str | None = None
         # A policy block (on_oversize), as opposed to a chunk verdict block.
@@ -581,7 +576,10 @@ class PromptDefense:
         payload_error = False
         chunk_failures = 0
         chunk_total = 0
+        aborted_chunks = 0
         first_chunk_failure: str | None = None
+        review_ran = False
+        overflow_chunks: int | None = None
 
         per_chunk = self._tier3_max_text_length
         # The ceiling uses the per-chunk content budget (minus the carried overlap), so the content
@@ -592,7 +590,7 @@ class PromptDefense:
             joined = format_records_for_tier3(value, depth_flag, ceiling, self._config.traversal.max_size)
         except Exception as e:
             payload_error = True
-            skip_reason = f"Tier 3 serialization error: {e}"
+            skip_reason = f"Tier 3 serialization error: {redact_error_text(describe_error(e))}"
         # A depth cut also hides content from the reviewer, so it counts as oversize.
         oversize = depth_flag.get("budget_exceeded") is True or depth_flag["hit"] is True
 
@@ -621,18 +619,42 @@ class PromptDefense:
             # Always review what fit, so a fitting injection is never dropped; on_oversize governs
             # only the overflow.
             chunks = chunk_tier3_input(joined, per_chunk)
-            results = await asyncio.gather(*(self._review_tier3_chunk(provider, c, tool_name) for c in chunks))
+            chunk_total = len(chunks)
+            stop = asyncio.Event() if t3.stop_on_first_block else None
+
+            def on_verdict(v: Tier3Verdict) -> None:
+                if stop is not None and t3.is_block(v):
+                    stop.set()
+
+            base_ctx = self._tier3_ctx(tool_name, "tier3_only", caller)
+            outcomes = await asyncio.gather(
+                *(
+                    t3.call(
+                        provider,
+                        c,
+                        {**base_ctx, "chunk": {"index": i, "total": chunk_total}},
+                        stop,
+                        on_verdict if stop is not None else None,
+                    )
+                    for i, c in enumerate(chunks)
+                )
+            )
+            review_ran = True
             blocked_count = 0
             blocking_chunk: int | None = None
             reviewed = 0
-            for idx, res in enumerate(results):
-                if isinstance(res, Tier3Skip):
+            for idx, out in enumerate(outcomes):
+                if out.kind == "aborted":
+                    aborted_chunks += 1
+                    continue
+                if out.kind == "failed" or out.verdict is None:
                     chunk_failures += 1
                     if first_chunk_failure is None:
-                        first_chunk_failure = res.skip_reason
+                        first_chunk_failure = out.skip_reason
                     continue
+                res = out.verdict
                 reviewed += 1
-                is_block = self._is_tier3_block(res)
+                is_block = t3.is_block(res)
                 if is_block:
                     blocked_count += 1
                     if blocking_chunk is None:
@@ -641,12 +663,9 @@ class PromptDefense:
                 if verdict is None:
                     verdict = res
                 else:
-                    rep_block = self._is_tier3_block(verdict)
-                    if (is_block and not rep_block) or (
-                        is_block == rep_block and (res.score or 0) > (verdict.score or 0)
-                    ):
+                    rep_block = t3.is_block(verdict)
+                    if (is_block and not rep_block) or (is_block == rep_block and (res.score or 0) > (verdict.score or 0)):
                         verdict = res
-            chunk_total = len(chunks)
             chunk_summary = Tier3ChunkSummary(
                 chunks=chunk_total,
                 blocked=blocked_count,
@@ -654,18 +673,17 @@ class PromptDefense:
                 oversize=True if oversize else None,
             )
             if reviewed == 0:
-                # Every chunk failed: provider outage or bad verdicts. Fails open.
+                # Every chunk failed: provider outage or bad verdicts. on_error decides (default: open).
                 if skip_reason is None:
                     skip_reason = first_chunk_failure or "Tier 3 skipped: no chunk produced a verdict"
                 depth_flag["coverage_degraded"] = True
             elif chunk_failures > 0:
+                # Partial coverage. Chunks aborted by stop_on_first_block don't count.
                 depth_flag["coverage_degraded"] = True
             if oversize:
                 depth_flag["coverage_degraded"] = True
-                # The overflow went unreviewed: scan_anyway fails closed on it unless a chunk blocked.
-                if not (verdict is not None and self._is_tier3_block(verdict)) and self._tier3_on_oversize == "scan_anyway":
-                    oversize_block = True
-                    skip_reason = f"Tool result exceeds review ceiling; {chunk_total} chunks scanned, overflow unreviewed"
+                # The overflow went unreviewed; on_oversize decides it once the final outcome is known.
+                overflow_chunks = chunk_total
 
         # Tier 1 runs for `detections` metadata only (the LLM decides in tier3_only). Its walk is
         # uncapped, so a failure here degrades coverage but doesn't override a verdict.
@@ -673,22 +691,60 @@ class PromptDefense:
         detections: list[str] = []
         sanitized_content: Any = value
         analysis_degraded = False
+        tier1_risk: RiskLevel = "low"
         try:
             sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name)
             detections, _tier1_flagged, patterns_by_field = self._tier1_metadata(sanitized)
+            tier1_risk = sanitized.metadata.overall_risk_level
             sanitized_content = sanitized.sanitized
             analysis_degraded = bool(self._coverage_degraded(sanitized.metadata, {"hit": False}))
         except Exception as e:
             analysis_degraded = True
             if skip_reason is None:
-                skip_reason = f"Tier 1 metadata error: {e}"
+                skip_reason = f"Tier 1 metadata error: {redact_error_text(describe_error(e))}"
 
-        blocked = oversize_block or (verdict is not None and self._is_tier3_block(verdict))
+        # The Tier 3 part of the decision: a chunk verdict, on_error, or the decide policy.
+        verdict_block = verdict is not None and t3.is_block(verdict)
+        tier3_blocks = verdict_block or ((t3.on_error or "allow") == "block" and chunk_failures > 0)
+        decided_by: str | None = None
+        if t3.decide is not None and review_ran:
+            d = t3.run_decide(
+                Tier3DecisionInput(
+                    mode="tier3_only",
+                    tier1=Tier3DecisionTier1(detected=bool(detections), risk_level=tier1_risk),
+                    tier3=(
+                        Tier3DecisionRan(
+                            decision="block" if verdict_block else "allow",
+                            refused=verdict.refused is True,
+                            score=verdict.score,
+                            unreviewed_chunks=chunk_failures + aborted_chunks,
+                        )
+                        if verdict is not None
+                        else Tier3DecisionNotRan(errored=chunk_failures > 0, skip_reason=skip_reason or "Tier 3 skipped")
+                    ),
+                    tool_name=tool_name,
+                )
+            )
+            decided_by = "options" if d == "default" else "policy"
+            if d != "default":
+                tier3_blocks = d == "block"
+        # on_oversize still governs the unreviewed overflow whatever the policy says.
+        if overflow_chunks is not None and not tier3_blocks and self._tier3_on_oversize == "scan_anyway":
+            oversize_block = True
+            skip_reason = f"Tool result exceeds review ceiling; {overflow_chunks} chunks scanned, overflow unreviewed"
+        blocked = oversize_block or tier3_blocks
+        # Chunks aborted by stop_on_first_block went unreviewed; that only matters if the call is allowed.
+        if not blocked and aborted_chunks > 0:
+            depth_flag["coverage_degraded"] = True
         risk_level: RiskLevel = "high" if blocked or payload_error else "low"
         # block_high_risk=False always allows; strict mode fails closed on a payload error.
         allowed = not self._config.block_high_risk or (not blocked and not payload_error)
 
-        errored = True if chunk_failures > 0 else None
+        meta: dict[str, Any] = {}
+        if chunk_failures > 0:
+            meta["errored"] = True
+        if decided_by is not None:
+            meta["decided_by"] = decided_by
         tier3_result: Tier3Result
         if verdict is not None:
             # skip_reason isn't reported with a verdict, so say why the outcome isn't the verdict's alone.
@@ -698,9 +754,9 @@ class PromptDefense:
             if chunk_failures > 0:
                 failed = f"{chunk_failures} of {chunk_total} chunks failed"
                 notes.append(f"{failed}: {first_chunk_failure}" if first_chunk_failure else failed)
-            tier3_result = replace(verdict, errored=errored, note="; ".join(notes) or None)
+            tier3_result = replace(verdict, note="; ".join(notes) or None, **meta)
         else:
-            tier3_result = Tier3Skip(skip_reason=skip_reason or "Tier 3 skipped", errored=errored)
+            tier3_result = Tier3Skip(skip_reason=skip_reason or "Tier 3 skipped", **meta)
 
         return DefenseResult(
             allowed=allowed,
@@ -723,7 +779,9 @@ class PromptDefense:
             tier3_chunk_summary=chunk_summary,
         )
 
-    def defend_tool_result(self, value: Any, tool_name: str) -> DefenseResult:
+    def defend_tool_result(
+        self, value: Any, tool_name: str, *, context: Mapping[str, Any] | None = None
+    ) -> DefenseResult:
         """Defend a tool result using Tier 1 and optionally Tier 2 / Tier 3 classification.
 
         When SFE is enabled, ``fields_dropped`` lists paths excluded from **Tier 2**
@@ -732,27 +790,46 @@ class PromptDefense:
 
         When ``enable_tier3`` is on, this delegates to :meth:`defend_tool_result_async`
         via ``asyncio.run``. Call that method directly from async code (e.g. FastAPI).
+
+        ``context`` (``user_goal``, ``tool_description``) is passed to the Tier 3 provider. Both
+        can carry untrusted text; defender itself doesn't read them.
         """
         if self._tier3_enabled:
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
-                return asyncio.run(self.defend_tool_result_async(value, tool_name))
+                return asyncio.run(self.defend_tool_result_async(value, tool_name, context=context))
             raise RuntimeError(
                 "defend_tool_result() cannot call Tier 3 from a running event loop; "
                 "use: await defense.defend_tool_result_async(value, tool_name)"
             )
         return self._defend_tool_result_sync(value, tool_name)
 
-    async def defend_tool_result_async(self, value: Any, tool_name: str) -> DefenseResult:
-        """Async defense path — required when Tier 3 is enabled inside a running event loop."""
+    async def defend_tool_result_async(
+        self, value: Any, tool_name: str, *, context: Mapping[str, Any] | None = None
+    ) -> DefenseResult:
+        """Async defense path — required when Tier 3 is enabled inside a running event loop.
+
+        Cancelling the calling task cancels in-flight Tier 3 calls and raises ``CancelledError``.
+        """
         start_time = time.perf_counter()
         depth_flag = {"hit": False}
+        caller = _caller_context(context)
 
         if self._tier3_enabled and self._defender_mode == "tier3_only":
             provider = self._resolve_tier3_provider()
             if provider is not None:
-                return await self._run_tier3_only(value, provider, tool_name, depth_flag, start_time)
+                return await self._run_tier3_only(value, provider, tool_name, depth_flag, start_time, caller)
+            # on_error="block" asked to fail closed: review with a provider that always fails.
+            if self._t3.on_error == "block":
+                if not self._tier3_missing_provider_warned:
+                    self._tier3_missing_provider_warned = True
+                    _logger.warning(
+                        "[defender] defender_mode=tier3_only but no Tier 3 provider is registered. "
+                        'on_error is "block", so calls fail closed. Call set_default_tier3_provider() at app startup.'
+                    )
+                self._t3.emit(Tier3Event(kind="missing_provider", mode="tier3_only"))
+                return await self._run_tier3_only(value, MISSING_PROVIDER, tool_name, depth_flag, start_time, caller)
             if not self._tier3_missing_provider_warned:
                 self._tier3_missing_provider_warned = True
                 _logger.warning(
@@ -761,7 +838,7 @@ class PromptDefense:
                 )
 
         return await self._defend_tool_result_async_impl(
-            value, tool_name, start_time=start_time, depth_flag=depth_flag
+            value, tool_name, start_time=start_time, depth_flag=depth_flag, caller=caller
         )
 
     async def _defend_tool_result_async_impl(
@@ -771,6 +848,7 @@ class PromptDefense:
         *,
         start_time: float,
         depth_flag: dict[str, bool],
+        caller: Mapping[str, str],
     ) -> DefenseResult:
         sfe_filtered_value: Any = value
         fields_dropped: list[str] = []
@@ -804,8 +882,6 @@ class PromptDefense:
             else _Tier2Outcome()
         )
 
-        tier3_result, tier3_override_block = await self._maybe_tier3_cascade(tier2, tool_name)
-
         tier1_idx = _RISK_LEVELS.index(sanitized.metadata.overall_risk_level)
         tier2_idx = _RISK_LEVELS.index(tier2.risk)
         risk_level = _RISK_LEVELS[max(tier1_idx, tier2_idx)]
@@ -819,6 +895,16 @@ class PromptDefense:
                 tier2.effective_score is not None
                 and tier2.effective_score >= self._config.tier2.high_risk_threshold
             )
+
+        tier3_result, tier3_override_block = await self._maybe_tier3_cascade(
+            tier2,
+            tool_name,
+            caller,
+            tier2_has_threat=tier2_has_threat,
+            tier2_idx=tier2_idx,
+            tier1_detected=bool(detections or tier1_flagged),
+            tier1_risk=sanitized.metadata.overall_risk_level,
+        )
 
         risk_level, allowed = self._finalize_allowed_and_risk(
             detections=detections,
@@ -1352,7 +1438,8 @@ class PromptDefense:
 
         When ``enable_tier3`` is on, delegates to :meth:`defend_tool_results_async`
         via ``asyncio.run`` (parallel per item, matching npm ``defendToolResults``).
-        Use the async method directly inside a running event loop.
+        Use the async method directly inside a running event loop. Each item may carry a
+        ``context`` (see :meth:`defend_tool_result`).
         """
         if self._tier3_enabled:
             try:
@@ -1363,7 +1450,7 @@ class PromptDefense:
                 "defend_tool_results() cannot call Tier 3 from a running event loop; "
                 "use: await defense.defend_tool_results_async(items)"
             )
-        return [self.defend_tool_result(item["value"], item["tool_name"]) for item in items]
+        return [self.defend_tool_result(item["value"], item["tool_name"], context=item.get("context")) for item in items]
 
     async def defend_tool_results_async(self, items: list[dict[str, Any]]) -> list[DefenseResult]:
         """Defend multiple tool results concurrently (npm ``defendToolResults`` parity).
@@ -1375,7 +1462,10 @@ class PromptDefense:
             return []
         return list(
             await asyncio.gather(
-                *(self.defend_tool_result_async(item["value"], item["tool_name"]) for item in items)
+                *(
+                    self.defend_tool_result_async(item["value"], item["tool_name"], context=item.get("context"))
+                    for item in items
+                )
             )
         )
 

@@ -57,6 +57,15 @@ pip install stackone-defender[sfe]
 # or: uv add "stackone-defender[sfe]"
 ```
 
+**Tier 3 over an OpenAI-compatible endpoint (optional)** — add extras:
+
+```bash
+pip install stackone-defender[llm]
+# or: uv add "stackone-defender[llm]"
+```
+
+The `[llm]` extra installs [`httpx`](https://www.python-httpx.org/) for `create_openai_compatible_tier3_provider`. `create_llm_tier3_provider` needs no extra.
+
 The `[sfe]` extra installs [`fasttext-ng`](https://pypi.org/project/fasttext-ng/) (provides the `fasttext` module). It requires **NumPy 2.3+**. PyPI may ship a wheel only for some platforms; otherwise pip/uv builds from source (needs a C++ toolchain).
 
 ## Quick start
@@ -122,15 +131,54 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 | jayavibhav (adversarial) | 0.9717 | ~1k |
 | **Average** | **0.9079** | ~25k |
 
-### Optional Tier 3 — LLM adjudication (consumer-supplied)
+### Optional Tier 3 — LLM adjudication (bring your own LLM)
 
-Authoritative LLM-based classification for the cases Tier 2 finds ambiguous. The package ships **only** the orchestration and the `Tier3Provider` interface — the actual model endpoint (a hosted LLM, OpenAI, an internal inference service) lives in your code, keeping proprietary models and credentials out of the package.
+Authoritative LLM-based classification for the cases Tier 2 finds ambiguous. You bring the model. Defender gives you three ways to plug it in:
+
+1. **`create_openai_compatible_tier3_provider`**: any OpenAI-compatible `/chat/completions` endpoint (OpenAI, vLLM, Ollama, OpenRouter, LiteLLM). Needs the `[llm]` extra.
+2. **`create_llm_tier3_provider`**: any other LLM. You write one `complete` function that calls the model; defender owns the prompt, the untrusted-text markers, strict reply parsing and refusal handling.
+3. **A hand-written provider**: an object with `classify(text, *, ctx=None)` that owns everything itself.
 
 Two modes, selected via `defender_mode`:
 - **`"cascade"`** (default): Tier 1 → Tier 2 → Tier 3, with Tier 3 invoked only when the Tier 2 effective score falls in the gray band (default `[0.3, 0.85)`). The Tier 3 verdict overrides Tier 2 on the escalated chunk — a `block` forces a block, an `allow` rescues it. Outside the band defender skips the round trip.
 - **`"tier3_only"`**: skip Tier 2; the block/allow decision is the Tier 3 verdict alone. Tier 1 still runs detection; the returned `sanitized` payload is the original content.
 
-Register a provider once at startup, then opt in per instance:
+```python
+import os
+
+from stackone_defender import create_openai_compatible_tier3_provider, create_prompt_defense
+
+judge = create_openai_compatible_tier3_provider(
+    base_url="https://api.openai.com/v1",
+    api_key=os.environ["OPENAI_API_KEY"],
+    model="gpt-4.1-mini",
+)
+defense = create_prompt_defense(
+    block_high_risk=True,
+    enable_tier3=True,
+    defender_mode="tier3_only",
+    tier3={"provider": judge, "timeout_ms": 10_000, "on_error": "block"},
+)
+result = await defense.defend_tool_result_async(
+    tool_output, "gmail_get_message", context={"user_goal": "Summarize my unread mail"}
+)
+```
+
+Around any other LLM, `complete` gets a request with `messages` (system + user), `deadline` and `json_schema`, and returns the reply text (sync or async):
+
+```python
+from stackone_defender import create_llm_tier3_provider
+
+async def complete(req):
+    reply = await my_llm.chat(req.messages, timeout=req.deadline)
+    return reply.text  # or {"text": ..., "refused": True} / {"text": ..., "score": p_block}
+
+judge = create_llm_tier3_provider(complete=complete)
+```
+
+The default prompt (`DEFAULT_TIER3_PROMPT`, version `TIER3_PROMPT_VERSION`) wraps the tool output, user goal and tool description in random-id markers and asks for `{"decision": "block" | "allow", "reason": "..."}`. Pass `prompt=Tier3PromptTemplate(system=..., user=...)` (the `user` part must contain `{{content}}` once; also `{{toolName}}`, `{{userGoal}}`, `{{toolDescription}}`) or a builder function that gets a `PromptInput`. A refusal, a content-filter hit, or a reply that isn't exactly one JSON verdict **blocks** (`result.tier3.refused`), because attacker text can cause those on purpose. `result.tier3.reason` is model output that can quote the attacker: log it, but never feed it back to an agent.
+
+A hand-written provider, registered once at startup:
 
 ```python
 from typing import Any
@@ -140,8 +188,9 @@ from stackone_defender.types import Tier3Verdict
 
 class MyProvider:
     def classify(self, text: str, *, ctx: dict[str, Any] | None = None) -> Tier3Verdict:
-        # Call your LLM endpoint here (sync or awaitable). ctx["toolName"] is available.
-        verdict = call_my_llm(text, tool_name=(ctx or {}).get("toolName"))
+        # Call your LLM endpoint here (sync or awaitable). ctx has tool_name, mode, chunk,
+        # user_goal / tool_description (untrusted), and deadline when timeout_ms is set.
+        verdict = call_my_llm(text, tool_name=(ctx or {}).get("tool_name"))
         return Tier3Verdict(decision="block" if verdict.block else "allow", score=verdict.p_block)
 
 set_default_tier3_provider(MyProvider())
@@ -176,7 +225,24 @@ A failed chunk is skipped (fail open), and `result.tier3.errored` and `coverage_
 
 **Choosing the operating point (`block_threshold`).** By default the model's `decision` word is authoritative — but that word is its argmax, an implicit 0.5 cut that moves on its own whenever the model is retrained. Set `tier3.block_threshold` to decide on `verdict.score` (P(block)) instead: the cut becomes an explicit config value — raise it to trade recall for fewer false positives, lower it for the reverse; `0.5` reproduces argmax. It requires a provider that reports `score` as P(block) (not "confidence in whichever decision I made" — those invert on allows). If `score` is missing or outside `[0, 1]` the verdict's `decision` is used instead and defender warns once, so a provider that cannot report a score degrades to the default rather than failing.
 
-**Fail-open semantics.** A provider error or timeout records a `skip_reason` on `result.tier3`; in cascade defender falls back to the Tier 2 decision, in `tier3_only` it allows the request. `enable_tier3=True` with no registered provider falls back to the standard Tier 1 + Tier 2 cascade and logs one warning per instance — Tier 3 misconfiguration never silently disables defense. `result.tier3` carries the verdict (a `Tier3Verdict`, or a `Tier3Skip` when the provider ran but returned nothing usable) when Tier 3 runs, and is `None` when it doesn't.
+**Policy options** (all in `tier3={...}`; camelCase keys work too):
+
+| Option | Default | What it does |
+|---|---|---|
+| `allow_override` | `True` | Cascade: whether a Tier-3 `allow` can undo a Tier-2 block. `False`: Tier 3 only adds blocks. `{"max_tier2_score": x}`: only when Tier 2's undamped score is below `x`. A general-purpose LLM can be talked into `allow`, so prefer `False` or a cap (defender warns once otherwise). |
+| `on_error` | cascade `"tier2"`, tier3_only `"allow"` | What a failure (error, timeout, invalid verdict) does. `"tier2"` keeps Tier 2's verdict. `"allow"` treats it as an allow. `"block"` blocks: in cascade when Tier 2 rated the payload medium or higher; in tier3_only when any chunk failed (and `on_oversize` then defaults to `"scan_anyway"`). A missing provider fails closed too. |
+| `decide` | none | `decide(Tier3DecisionInput) -> "block" \| "allow" \| "default"`, called once per call after Tier 3 ran or failed. Replaces `allow_override` and `on_error` for that call. Gets metadata only (never content). A raise or bad return means `"default"`. |
+| `timeout_ms` | none | Per provider call, from when it gets a concurrency slot. An async provider is cancelled at the deadline (`ctx["deadline"]`); a sync one can't be interrupted. |
+| `max_concurrency` | unbounded | Max in-flight provider calls per instance (per event loop). Set `timeout_ms` with it. |
+| `stop_on_first_block` | `False` | tier3_only: cancel the remaining chunk calls once one blocks. |
+| `on_event` | none | Called once per provider call with a `Tier3Event` (kind, mode, chunk, latency, usage, redacted error code). No content. Exceptions are ignored. |
+| `include_raw` | `True` | Keep `raw` on `result.tier3`. `raw` can quote tool content. |
+
+**Result fields.** `result.tier3` is a `Tier3Verdict` (or a `Tier3Skip` when no verdict was obtained) and `None` when Tier 3 didn't run. Besides `decision`, `score`, `reason`, `refused` and `prompt_version`, defender sets: `errored` (a real failure), `note` (why the outcome isn't the verdict's alone), `override_applied` / `override_suppressed` (cascade), and `decided_by` (`"policy"` or `"options"` when `decide` is set). Provider error text in `skip_reason`, `note` and events is redacted (keys, tokens, URL paths) and capped.
+
+**Cancellation.** Cancelling the task that awaits `defend_tool_result_async` cancels in-flight provider calls and raises `CancelledError`.
+
+**Fail-open by default.** Without `on_error="block"`, a provider error or timeout records a `skip_reason`; in cascade defender falls back to the Tier 2 decision, in `tier3_only` it allows. `enable_tier3=True` with no provider (and no `on_error="block"`) falls back to Tier 1 + Tier 2 and logs one warning per instance, so Tier 3 misconfiguration never silently disables defense.
 
 ### `allowed` vs `risk_level`
 
@@ -213,7 +279,7 @@ defense = create_prompt_defense(
 )
 ```
 
-### `defense.defend_tool_result(value, tool_name)`
+### `defense.defend_tool_result(value, tool_name, *, context=None)`
 
 Runs Tier 1 sanitization on risky fields of the **original** payload, then Tier 2 on strings from the SFE-filtered view when SFE is on (otherwise the full value). Optional `tier2_fields` restricts Tier 2 extraction to specific keys; omit it to classify **all** strings (matches `@stackone/defender` 0.6.3). **Synchronous** — no `await`.
 
@@ -332,7 +398,7 @@ uv run pytest
 This package mirrors [`@stackone/defender`](https://github.com/StackOneHQ/defender). `tests/conformance/` is a pinned copy of its shared conformance fixtures: input → expected-output cases for Tier-3 serialization, prompt rendering, verdict parsing, error redaction and policy decisions. `tests/test_conformance.py` runs them against this package.
 
 - `scripts/sync_conformance.sh <ref>` copies the fixtures at a TS tag or commit and records it in `tests/conformance/VERSION`. CI checks the copy matches (`--check`).
-- Cases this package doesn't match yet are listed in `tests/conformance_known_failures.txt` and run as strict xfails. When a port makes one pass, remove its line.
+- Every case passes. A new TS case this package can't match yet goes in `tests/conformance_known_failures.txt`, where it runs as a strict xfail; remove its line once a port makes it pass.
 - Port contract for the runner: a rejected prompt template and an unusable verdict reply raise `ValueError`; optional result fields are `None` when unset (not `False`).
 
 Traps when porting from TypeScript (the fixtures pin TS behavior):
