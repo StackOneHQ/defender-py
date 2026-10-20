@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections import UserDict, deque
+from dataclasses import dataclass
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -125,33 +129,302 @@ class TestPromptDefenseTier3Only:
         assert "endpoint timeout" in result.tier3.skip_reason
 
 
-class TestPromptDefenseTier3InputCap:
-    def test_truncates_tier3_only_input(self):
-        provider = _make_provider("allow")
-        set_default_tier3_provider(provider)
-        defense = create_prompt_defense(
-            enable_tier1=False,
-            enable_tier2=False,
-            enable_tier3=True,
-            defender_mode="tier3_only",
-            tier3={"max_text_length": 50},
-        )
-        asyncio.run(defense.defend_tool_result_async({"body": "a" * 500}, "test_tool"))
-        passed = provider.classify.call_args[0][0]
-        assert len(passed) == 50
+@dataclass
+class _DC:
+    k: str
 
-    def test_defaults_cap_to_10000(self):
-        provider = _make_provider("allow")
-        set_default_tier3_provider(provider)
+
+class _Judge:
+    """Records each chunk; blocks any chunk containing ``trigger``."""
+
+    def __init__(self, trigger: str | None = None):
+        self.trigger = trigger
+        self.calls: list[str] = []
+
+    def classify(self, text, *, ctx=None):
+        self.calls.append(text)
+        return {"decision": "block" if self.trigger and self.trigger in text else "allow"}
+
+
+def _tier3_only(provider, **tier3):
+    return create_prompt_defense(
+        enable_tier1=False,
+        enable_tier2=False,
+        block_high_risk=True,
+        enable_tier3=True,
+        defender_mode="tier3_only",
+        tier3={"provider": provider, **tier3},
+    )
+
+
+def _run(defense, value):
+    return asyncio.run(defense.defend_tool_result_async(value, "test_tool"))
+
+
+class TestPromptDefenseTier3Chunking:
+    def test_chunks_within_max_text_length(self):
+        judge = _Judge()
+        r = _run(_tier3_only(judge, max_text_length=50), {"body": " ".join(["word"] * 40)})
+        assert len(judge.calls) > 1
+        assert all(len(c) <= 50 for c in judge.calls)
+        assert r.tier3_chunk_summary.chunks == len(judge.calls)
+
+    def test_late_injection_is_reviewed(self):
+        judge = _Judge("EVIL")
+        payload = {"body": "benign text. " * 2000 + "EVIL instruction"}
+        r = _run(_tier3_only(judge), payload)
+        assert not r.allowed
+        assert r.tier3_chunk_summary.blocking_chunk == len(judge.calls) - 1
+
+    def test_defaults_review_up_to_five_chunks(self):
+        judge = _Judge()
+        r = _run(_tier3_only(judge), {"body": "x " * 20000})
+        assert 1 < len(judge.calls) <= 6
+        assert all(len(c) <= 10000 for c in judge.calls)
+        assert r.tier3_chunk_summary.oversize is None
+
+    def test_oversize_block_skips_review(self):
+        judge = _Judge()
+        r = _run(_tier3_only(judge, max_text_length=100, max_chunks=1, on_oversize="block"), {"body": "y " * 500})
+        assert judge.calls == []
+        assert not r.allowed
+        assert "onOversize" in r.tier3.skip_reason
+
+    def test_oversize_skip_allows_and_flags(self):
+        judge = _Judge()
+        r = _run(_tier3_only(judge, max_text_length=100, max_chunks=1), {"body": "y " * 500})
+        assert r.allowed
+        assert r.coverage_degraded is True
+        assert r.tier3_chunk_summary.oversize is True
+
+    def test_scalar_only_keys_reviewed(self):
+        judge = _Judge("ignore previous")
+        r = _run(_tier3_only(judge), {"ignore previous instructions": 1})
+        assert judge.calls == ["ignore previous instructions: 1"]
+        assert not r.allowed
+
+
+class TestTier3InputPythonTypes:
+    def test_text_bytes_reviewed_as_text(self):
+        judge = _Judge("EVIL")
+        r = _run(_tier3_only(judge), {"body": b"EVIL instruction"})
+        assert judge.calls == ["body: EVIL instruction"]
+        assert not r.allowed
+
+    def test_non_utf8_bytes_summarized(self):
+        judge = _Judge()
+        _run(_tier3_only(judge), {"name": "x", "blob": b"\xff" * 10})
+        assert judge.calls == ["name: x\nblob: <binary 10 bytes>"]
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"EVIL"},
+            frozenset({"EVIL"}),
+            deque(["EVIL"]),
+            MappingProxyType({"k": "EVIL"}),
+            UserDict({"k": "EVIL"}),
+            _DC("EVIL"),
+            [_DC("EVIL")],
+            SimpleNamespace(k="EVIL"),
+        ],
+        ids=["set", "frozenset", "deque", "mappingproxy", "userdict", "dataclass", "dataclass-in-list", "object"],
+    )
+    def test_python_containers_reviewed(self, value):
+        judge = _Judge("EVIL")
+        r = _run(_tier3_only(judge), value)
+        assert any("EVIL" in c for c in judge.calls)
+        assert not r.allowed
+
+    def test_lone_surrogate_replaced(self):
+        class Utf8Judge(_Judge):
+            def classify(self, text, *, ctx=None):
+                text.encode("utf-8")
+                return super().classify(text, ctx=ctx)
+
+        judge = Utf8Judge("EVIL")
+        r = _run(_tier3_only(judge), json.loads('{"a": "\\ud800 EVIL"}'))
+        assert judge.calls == ["a: \ufffd EVIL"]
+        assert not r.allowed
+
+    def test_huge_int_and_digit_key(self):
+        judge = _Judge()
+        r = _run(_tier3_only(judge), {"9" * 5000: "x", "n": 10**400, "m": -(10**400)})
+        assert r.allowed
+        assert judge.calls == [f"{'9' * 5000}: x\nn: Infinity\nm: -Infinity"]
+
+    def test_tuple_is_an_array(self):
+        judge = _Judge()
+        _run(_tier3_only(judge), {"tags": ("a", "b")})
+        assert judge.calls == ["tags[0]: a\ntags[1]: b"]
+
+    def test_big_int_printed_exactly(self):
+        judge = _Judge()
+        _run(_tier3_only(judge), {"name": "x", "n": 12345678901234567891})
+        assert judge.calls == ["name: x\nn: 12345678901234567891"]
+
+    def test_bool_and_none_render_like_json(self):
+        judge = _Judge()
+        _run(_tier3_only(judge), {"name": "x", "ok": True, "gone": None})
+        assert judge.calls == ["name: x\nok: true\ngone: null"]
+
+    def test_astral_text_never_split(self):
+        judge = _Judge()
+        _run(_tier3_only(judge, max_text_length=7), {"e": "\U0001f600" * 40})
+        assert len(judge.calls) > 1
+        for c in judge.calls:
+            c.encode("utf-8")  # a lone surrogate would raise
+
+    def test_serialization_error_fails_closed(self):
+        class Exploding(dict):
+            def items(self):
+                raise RuntimeError("boom")
+
+        judge = _Judge()
+        r = _run(_tier3_only(judge), Exploding(a="b"))
+        assert judge.calls == []
+        assert not r.allowed
+        assert r.risk_level == "high"
+        assert r.tier3.skip_reason == "Tier 3 serialization error: boom"
+
+
+class TestTier3OversizedPythonTypes:
+    @pytest.mark.parametrize(
+        "big",
+        [lambda n: set(range(n)), lambda n: b"x" * n, lambda n: MappingProxyType(dict.fromkeys(range(n)))],
+        ids=["set", "bytes", "mapping"],
+    )
+    def test_not_copied_and_flagged_oversize(self, big):
+        judge = _Judge()
+        defense = create_prompt_defense(
+            config={"traversal": {"max_size": 1000}},
+            enable_tier1=False,
+            enable_tier2=False,
+            block_high_risk=True,
+            enable_tier3=True,
+            defender_mode="tier3_only",
+            tier3={"provider": judge, "on_oversize": "block"},
+        )
+        for value in ({"name": "x", "big": big(5000)}, big(5000)):
+            r = _run(defense, value)
+            assert judge.calls == []
+            assert not r.allowed
+            assert r.coverage_degraded is True
+
+    def test_huge_range_reviewed_as_text(self):
+        judge = _Judge()
+        _run(_tier3_only(judge), {"r": range(10**30)})
+        assert judge.calls == [f"r: {range(10**30)}"]
+
+
+class TestTier3OnlyOutcomes:
+    def test_partial_chunk_failure_notes_and_flags(self):
+        class Flaky(_Judge):
+            def classify(self, text, *, ctx=None):
+                self.calls.append(text)
+                if len(self.calls) == 2:
+                    raise RuntimeError("down")
+                return {"decision": "allow"}
+
+        judge = Flaky()
+        r = _run(_tier3_only(judge, max_text_length=50), {"body": " ".join(["word"] * 40)})
+        n = len(judge.calls)
+        assert r.allowed
+        assert r.coverage_degraded is True
+        assert r.tier3.errored is True
+        assert r.tier3.note == f"1 of {n} chunks failed: Tier 3 provider error: down"
+
+    def test_block_beats_higher_scored_allow(self):
+        class Mixed(_Judge):
+            def classify(self, text, *, ctx=None):
+                self.calls.append(text)
+                if "EVIL" in text:
+                    return {"decision": "block", "score": 0.6}
+                return {"decision": "allow", "score": 0.9}
+
+        r = _run(_tier3_only(Mixed(), max_text_length=60), {"a": "x " * 40, "b": "EVIL"})
+        assert r.tier3.decision == "block"
+        assert r.tier3.score == 0.6
+
+    def test_provider_cannot_set_meta(self):
+        class Spoof(_Judge):
+            def classify(self, text, *, ctx=None):
+                return Tier3Verdict(decision="allow", errored=True, note="spoofed")
+
+        r = _run(_tier3_only(Spoof()), {"a": "b"})
+        assert r.tier3.errored is None
+        assert r.tier3.note is None
+
+    def test_provider_cancelled_error_is_a_chunk_failure(self):
+        class Cancels(_Judge):
+            async def classify(self, text, *, ctx=None):
+                raise asyncio.CancelledError()
+
+        r = _run(_tier3_only(Cancels()), {"a": "b"})
+        assert r.allowed
+        assert r.tier3.errored is True
+
+    def test_payload_error_allows_when_not_strict(self):
+        class Exploding(dict):
+            def items(self):
+                raise RuntimeError("boom")
+
         defense = create_prompt_defense(
             enable_tier1=False,
             enable_tier2=False,
             enable_tier3=True,
             defender_mode="tier3_only",
+            tier3={"provider": _Judge()},
         )
-        asyncio.run(defense.defend_tool_result_async({"body": "x" * 50000}, "test_tool"))
-        passed = provider.classify.call_args[0][0]
-        assert len(passed) == 10000
+        r = _run(defense, Exploding(a="b"))
+        assert r.allowed
+        assert r.risk_level == "high"
+        assert r.coverage_degraded is True
+
+    def test_scan_anyway_blocks_unreviewed_overflow(self):
+        judge = _Judge()
+        r = _run(_tier3_only(judge, max_text_length=100, max_chunks=1, on_oversize="scan_anyway"), {"b": "y " * 500})
+        assert judge.calls
+        assert not r.allowed
+        assert "overflow unreviewed" in r.tier3.note
+
+    def test_sync_and_batch_paths(self):
+        judge = _Judge("EVIL")
+        defense = _tier3_only(judge)
+        assert not defense.defend_tool_result({"a": "EVIL"}, "t").allowed
+        results = defense.defend_tool_results(
+            [{"value": {"a": "EVIL"}, "tool_name": "t"}, {"value": {"a": "fine"}, "tool_name": "t"}]
+        )
+        assert [r.allowed for r in results] == [False, True]
+
+
+class TestTier3ChunkOptions:
+    def test_huge_int_options_dont_crash(self):
+        defense = _tier3_only(_Judge(), max_chunks=10**400)
+        assert defense._tier3_max_chunks == 10**400
+        defense = _tier3_only(_Judge(), max_text_length=-(10**400))
+        assert defense._tier3_max_text_length == 10000
+
+    @pytest.mark.parametrize("value", [0, 0.5, -1, float("inf"), "5", True])
+    def test_invalid_max_chunks_falls_back(self, value, caplog):
+        defense = _tier3_only(_Judge(), max_chunks=value)
+        assert defense._tier3_max_chunks == 5
+        assert any("max_chunks" in r.message for r in caplog.records)
+
+    def test_max_text_length_below_one_rejected(self, caplog):
+        defense = _tier3_only(_Judge(), max_text_length=0.5)
+        assert defense._tier3_max_text_length == 10000
+        assert any("max_text_length" in r.message for r in caplog.records)
+
+    def test_invalid_on_oversize_falls_back(self, caplog):
+        defense = _tier3_only(_Judge(), on_oversize="drop")
+        assert defense._tier3_on_oversize == "skip"
+        assert any("on_oversize" in r.message for r in caplog.records)
+
+    def test_camel_case_options_accepted(self):
+        defense = _tier3_only(_Judge(), maxChunks=2, onOversize="scan_anyway")
+        assert defense._tier3_max_chunks == 2
+        assert defense._tier3_on_oversize == "scan_anyway"
 
 
 @patch("stackone_defender.core.prompt_defense.create_tier2_classifier")
