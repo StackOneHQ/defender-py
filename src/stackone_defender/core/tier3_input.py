@@ -11,8 +11,10 @@ conformance fixtures pin the output byte for byte, so this follows the TS code c
 
 from __future__ import annotations
 
+import dataclasses
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from decimal import Decimal
 from typing import Any
 
@@ -53,14 +55,17 @@ def to_utf16(s: str) -> str:
 
 
 def from_utf16(s: str) -> str:
-    """Join surrogate pairs back into characters (unpaired surrogates are kept)."""
+    """Join surrogate pairs back into characters. An unpaired surrogate becomes U+FFFD, so a
+    provider that encodes to UTF-8 can't be made to fail (and fail open) by one."""
     if not _SURROGATE.search(s):
         return s
-    return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+    return s.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
 
 
 def _utf16_len(s: str) -> int:
-    return len(s) + len(_ASTRAL.findall(s))
+    if not _ASTRAL.search(s):
+        return len(s)
+    return len(s.encode("utf-16-le", "surrogatepass")) // 2
 
 
 def _is_high(c: str) -> bool:
@@ -93,7 +98,10 @@ def _js_number(x: int | float) -> str:
     if isinstance(x, int):
         if abs(x) < 10**21:
             return str(x)
-        x = float(x)
+        try:
+            x = float(x)
+        except OverflowError:
+            return "Infinity" if x > 0 else "-Infinity"
     if x != x:
         return "NaN"
     if x in (float("inf"), float("-inf")):
@@ -143,7 +151,8 @@ def _js_entries(obj: dict) -> list[tuple[str, Any]]:
     rest: list[tuple[str, Any]] = []
     for k, v in obj.items():
         key = k if isinstance(k, str) else _js_string(k)
-        if _INDEX_KEY.fullmatch(key) and int(key) <= _MAX_ARRAY_INDEX:
+        # <= 10 digits first: int() on a huge digit string is slow, then raises.
+        if len(key) <= 10 and _INDEX_KEY.fullmatch(key) and int(key) <= _MAX_ARRAY_INDEX:
             index_keys.append((int(key), key, v))
         else:
             rest.append((key, v))
@@ -157,7 +166,7 @@ def _estimate_size(v: Any) -> int:
     if v is None:
         return 4
     if isinstance(v, str):
-        return len(v) + 2
+        return _utf16_len(v) + 2
     if isinstance(v, bool):
         return 4 if v else 5
     if isinstance(v, (int, float)):
@@ -167,8 +176,31 @@ def _estimate_size(v: Any) -> int:
     if _is_array(v):
         return 2 + max(0, len(v) - 1)
     if isinstance(v, dict):
-        return 2 + sum(len(str(k)) + 3 for k in v) + max(0, len(v) - 1)
+        return 2 + sum(_utf16_len(str(k)) + 3 for k in v) + max(0, len(v) - 1)
     return 0
+
+
+def _normalize(v: Any) -> Any:
+    """Map Python-only types onto the JSON shapes the TS port handles, so their text is reviewed.
+
+    Mappings and dataclasses become dicts; sets and other sequences become lists; bytes that
+    decode as UTF-8 become text (other bytes stay binary). Anything else is reviewed as ``str(v)``.
+    """
+    if v is None or isinstance(v, (str, bool, int, float, list, tuple, dict)):
+        return v
+    if isinstance(v, _BINARY):
+        try:
+            return bytes(v).decode("utf-8")
+        except UnicodeDecodeError:
+            return v
+    if dataclasses.is_dataclass(v) and not isinstance(v, type):
+        return {f.name: getattr(v, f.name) for f in dataclasses.fields(v)}
+    if isinstance(v, Mapping):
+        return dict(v.items())
+    # range is lazy: listing it could allocate without bound.
+    if isinstance(v, (AbstractSet, Sequence)) and not isinstance(v, range):
+        return list(v)
+    return str(v)
 
 
 def _is_empty_value(v: Any) -> bool:
@@ -272,7 +304,10 @@ class _Meter:
 
 def _sum_string_content(v: Any, depth: int, meter: _Meter) -> int:
     """String-leaf content as the serializer emits it (UTF-16 units, line breaks excluded)."""
-    if depth > MAX_TRAVERSAL_DEPTH or not meter.add(v):
+    if depth > MAX_TRAVERSAL_DEPTH:
+        return 0
+    v = _normalize(v)
+    if not meter.add(v):
         return 0
     if isinstance(v, str):
         return _utf16_len(v) - len(_LINE_BREAKS.findall(v))
@@ -337,6 +372,7 @@ class _Serializer:
             return
         if self.meter.hit:
             return
+        v = _normalize(v)
         if not self.meter.add(v):
             self._degrade()
             return
@@ -467,7 +503,7 @@ class _Serializer:
                 else self.cap
             )
             self.used += 2 if emitted else 0  # the "\n\n" before this block (rolled back if empty)
-            record = records[i]
+            record = _normalize(records[i])
             lines: list[str] = []
             prefix = f"[{i}]" if top_is_array and not isinstance(record, dict) else ""
             self.serialize(record, prefix, lines, 0, False, False)
@@ -487,6 +523,7 @@ def format_records_for_tier3(value: Any, depth_flag: dict[str, Any], max_chars: 
     emitted. Sets ``depth_flag["coverage_degraded"]`` on any drop and ``depth_flag["budget_exceeded"]``
     when content didn't fit (oversize).
     """
+    value = _normalize(value)
     top_is_array = _is_array(value)
     records = list(value) if top_is_array else [value]
     ser = _Serializer(depth_flag, max_chars, max_size)

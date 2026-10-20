@@ -158,12 +158,11 @@ def _extract_strings(
 
 
 def _finite_at_least_one(v: Any) -> bool:
-    return (
-        isinstance(v, (int, float))
-        and not isinstance(v, bool)
-        and math.isfinite(v)
-        and math.floor(v) >= 1
-    )
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if isinstance(v, int):
+        return v >= 1  # math.isfinite overflows on huge ints
+    return math.isfinite(v) and math.floor(v) >= 1
 
 
 _RISK_LEVELS: list[RiskLevel] = ["low", "medium", "high", "critical"]
@@ -405,7 +404,10 @@ class PromptDefense:
     def _validate_tier3_verdict(verdict: Any) -> Tier3Verdict | Tier3Skip:
         if isinstance(verdict, Tier3Verdict):
             if verdict.decision in ("block", "allow"):
-                return replace(verdict, score=PromptDefense._normalize_tier3_score(verdict.score))
+                # errored/note are set by the defender, never by a provider.
+                return replace(
+                    verdict, score=PromptDefense._normalize_tier3_score(verdict.score), errored=None, note=None
+                )
             return Tier3Skip(
                 skip_reason=(
                     f'Tier 3 provider returned invalid decision: {verdict.decision!r} '
@@ -549,6 +551,12 @@ class PromptDefense:
     async def _review_tier3_chunk(self, provider: Tier3Provider, text: str, tool_name: str) -> Tier3Result:
         try:
             raw = await self._invoke_tier3_classify(provider, text, tool_name)
+        except asyncio.CancelledError as e:
+            # Our own task being cancelled must propagate; a provider's internal cancel is a chunk failure.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+            return Tier3Skip(skip_reason=f"Tier 3 provider error: cancelled {e}".rstrip())
         except Exception as e:
             return Tier3Skip(skip_reason=f"Tier 3 provider error: {e}")
         return self._validate_tier3_verdict(raw)

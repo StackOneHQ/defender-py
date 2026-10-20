@@ -161,16 +161,18 @@ defense = create_prompt_defense(
 )
 ```
 
-**What the reviewer sees (`tier3_only`).** The tool result is serialized as `field: value` lines, one block per record, so a bare value keeps its field name (`status: create` rather than `create`, which reads like an instruction). Nested keys are dotted (`user.name: …`), list items are indexed (`items[0]: …`), and each line of a multi-line value keeps its prefix. A large list of only numbers collapses to `key: [N numbers]`. Keys are reviewed even when the value is a number, boolean, `None` or empty, because keys can carry injected text.
+**What the reviewer sees (`tier3_only`).** The tool result is serialized as `field: value` lines, one block per record, so a bare value keeps its field name (`status: create` rather than `create`, which reads like an instruction). Nested keys are dotted (`user.name: …`), list items are indexed (`items[0]: …`), and each line of a multi-line value keeps its prefix. A large list of only numbers collapses to `key: [N numbers]`. Keys are reviewed even when the value is a number, boolean, `None` or empty, because keys can carry injected text. Python-only types are reviewed too: mappings and dataclasses as objects, sets and other sequences as lists, UTF-8 `bytes` as text, and anything else as `str(value)`.
 
 The serialized text is split into chunks of at most `max_text_length` characters (lengths count UTF-16 code units, as in the TypeScript package). Neighbouring chunks overlap by up to 500 characters, so an injection cut at a chunk boundary still appears whole. All chunks are reviewed in parallel, and any blocking chunk blocks the result. `result.tier3_chunk_summary` reports `chunks`, `blocked` and `blocking_chunk`.
 
-**Oversize (`on_oversize`).** Up to about `max_chunks` chunks are reviewed per tool result. Content beyond that is oversize, and `tier3_chunk_summary.oversize` is set:
-- `"skip"` (default): review the content that fits and allow the rest. A fitting injection still blocks.
-- `"block"`: block without calling the provider (in strict mode).
+**Oversize (`on_oversize`).** Up to about `max_chunks` chunks are reviewed per tool result. Content beyond that is oversize, and `coverage_degraded` is `True`. Blocking below requires `block_high_risk=True`.
+- `"skip"` (default): review the content that fits and allow the rest. A fitting injection still blocks. This favors availability, so set `"block"` or `"scan_anyway"` to fail closed.
+- `"block"`: block without calling the provider. `tier3_chunk_summary` is `None` and `result.tier3.skip_reason` says why.
 - `"scan_anyway"`: review what fits, then block on the unreviewed rest unless a chunk already blocked.
 
-A failed chunk is skipped (fail open). Then `result.tier3.errored` is `True`, `coverage_degraded` is `True`, and `result.tier3.note` says how many chunks failed. `note` also gives the reason for an `on_oversize` block when the provider allowed.
+In `"skip"` and `"scan_anyway"`, `tier3_chunk_summary.oversize` is `True`.
+
+A failed chunk is skipped (fail open), and `result.tier3.errored` and `coverage_degraded` are `True`. With a verdict, `result.tier3.note` says how many chunks failed; it also gives the reason for an `on_oversize` block when the provider allowed. When every chunk fails there's no verdict, and `result.tier3.skip_reason` gives the first failure.
 
 **Choosing the operating point (`block_threshold`).** By default the model's `decision` word is authoritative — but that word is its argmax, an implicit 0.5 cut that moves on its own whenever the model is retrained. Set `tier3.block_threshold` to decide on `verdict.score` (P(block)) instead: the cut becomes an explicit config value — raise it to trade recall for fewer false positives, lower it for the reverse; `0.5` reproduces argmax. It requires a provider that reports `score` as P(block) (not "confidence in whichever decision I made" — those invert on allows). If `score` is missing or outside `[0, 1]` the verdict's `decision` is used instead and defender warns once, so a provider that cannot report a score degrades to the default rather than failing.
 
