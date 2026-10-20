@@ -19,7 +19,7 @@
     <img src="https://img.shields.io/badge/model-22MB-047B43?style=flat-square" alt="Model size: 22MB" />
     <img src="https://img.shields.io/badge/latency-~10ms-047B43?style=flat-square" alt="Latency: ~10ms" />
     <img src="https://img.shields.io/badge/CPU--only-no%20GPU%20needed-047B43?style=flat-square" alt="CPU only" />
-    <img src="https://img.shields.io/badge/F1%20Score-90.8%25-047B43?style=flat-square" alt="F1 Score: 90.8%" />
+    <img src="https://img.shields.io/badge/F1%20Score-86.5%25-047B43?style=flat-square" alt="F1 Score: 86.5%" />
   </p>
 
 </div>
@@ -123,14 +123,16 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 - **Tier 2** extracts strings from the SFE-filtered tree; `fields_dropped` lists paths omitted from that extraction (not removed from `sanitized`)
 - Fails open if the runtime/model is unavailable: payload continues unfiltered
 
-**Benchmarks** (F1 @ threshold 0.5):
+**Benchmarks** (Tier 2 only, through the package pipeline at the default threshold 0.52; measured 2026-10-20):
 
-| Benchmark | F1 | Samples |
-|-----------|-----|--------|
-| Qualifire (in-distribution) | 0.8686 | ~1.5k |
-| xxz224 (out-of-distribution) | 0.8834 | ~22.5k |
-| jayavibhav (adversarial) | 0.9717 | ~1k |
-| **Average** | **0.9079** | ~25k |
+| Benchmark | F1 | Precision | Recall | Samples |
+|-----------|-----|-----------|--------|---------|
+| Qualifire (held-out test split; the dataset's train split is used in training) | 0.828 | 0.857 | 0.800 | 751 |
+| xxz224 (out-of-distribution) | 0.814 | 0.989 | 0.691 | ~22.5k |
+| jayavibhav (unseen rows; other rows of this split are used in training) | 0.955 | 0.960 | 0.950 | ~60k |
+| **Average** | **0.865** | | | |
+
+The previous model scores 0.843 on the same sets and method. Earlier READMEs showed 0.908 from a different method (raw scores, best threshold picked per dataset), which isn't comparable. Latency is about 10 ms per call (p50 on a 2-vCPU container, short inputs); long inputs that split into several chunks take longer.
 
 ### Optional Tier 3 — LLM adjudication (bring your own LLM)
 
