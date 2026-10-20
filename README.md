@@ -151,7 +151,7 @@ from stackone_defender import create_openai_compatible_tier3_provider, create_pr
 judge = create_openai_compatible_tier3_provider(
     base_url="https://api.openai.com/v1",
     api_key=os.environ["OPENAI_API_KEY"],
-    model="gpt-4.1-mini",
+    model="gpt-6-luna",
 )
 defense = create_prompt_defense(
     block_high_risk=True,
