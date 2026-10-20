@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.0...stackone-defender-v0.9.1) (2026-10-20)
+
+
+### Features
+
+* **ENG-3500:** bring-your-own-LLM Tier 3 and policy options ([#38](https://github.com/StackOneHQ/defender-py/issues/38)) ([9923491](https://github.com/StackOneHQ/defender-py/commit/9923491c413bafa09d8aee0c47aabd43ed049d09))
+
 ## [0.9.0](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.8.2...stackone-defender-v0.9.0) (2026-10-20)
 
 
