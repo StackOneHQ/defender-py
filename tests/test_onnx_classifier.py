@@ -102,7 +102,7 @@ class TestTier2Classifier:
 
     def test_risk_levels(self):
         assert self.classifier.get_risk_level(0.9) == "high"
-        assert self.classifier.get_risk_level(0.6) == "medium"
+        assert self.classifier.get_risk_level(0.51) == "medium"  # medium is [0.5, 0.52) with the bundled model
         assert self.classifier.get_risk_level(0.3) == "low"
 
     def test_is_injection(self):
@@ -119,7 +119,7 @@ class TestTier2ClassifierNoModel:
     def test_risk_level_thresholds(self):
         c = Tier2Classifier()
         assert c.get_risk_level(0.9) == "high"
-        assert c.get_risk_level(0.6) == "medium"
+        assert c.get_risk_level(0.51) == "medium"  # medium is [0.5, 0.52) with the bundled model
         assert c.get_risk_level(0.3) == "low"
         assert c.get_risk_level(0.0) == "low"
         assert c.get_risk_level(1.0) == "high"

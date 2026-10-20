@@ -39,7 +39,7 @@ class TestTier2ClassifierConfig:
     def test_default_config(self):
         c = Tier2Classifier()
         assert c.get_risk_level(0.9) == "high"
-        assert c.get_risk_level(0.6) == "medium"
+        assert c.get_risk_level(0.51) == "medium"  # medium is [0.5, 0.52) with the bundled model
         assert c.get_risk_level(0.3) == "low"
 
     def test_custom_thresholds(self):
@@ -65,10 +65,10 @@ class TestTier2ClassifierConfig:
     def test_get_config(self):
         c = Tier2Classifier()
         cfg = c.get_config()
-        # The bundled minilm-multihead-v5 model ships calibrated defaults via
-        # classifier_config.json (T=2.41, high_risk_threshold=0.64). Library
-        # defaults still apply for fields the model doesn't override.
-        assert cfg["high_risk_threshold"] == 0.64
+        # The bundled model ships calibrated defaults via classifier_config.json
+        # (T=2.41, high_risk_threshold=0.52; ENG-3282). Library defaults still
+        # apply for fields the model doesn't override.
+        assert cfg["high_risk_threshold"] == 0.52
         assert cfg["medium_risk_threshold"] == 0.5
         assert cfg["min_text_length"] == 10
         assert cfg["max_text_length"] == 10000
@@ -113,7 +113,7 @@ class TestCalibrationAutoLoad:
     def test_thresholds_from_model_calibration(self):
         c = Tier2Classifier()
         cfg = c.get_config()
-        assert cfg["high_risk_threshold"] == 0.64
+        assert cfg["high_risk_threshold"] == 0.52
 
     def test_caller_overrides_model(self, tmp_path: Path):
         # Caller-supplied config wins over model calibration.

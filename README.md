@@ -112,8 +112,9 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 - Split text into sentences, pack to model-sized chunks, score chunks in batched ONNX calls
 - Catches paraphrased or novel injections missed by regex
 - Uses chunked batch inference to bound memory on large payloads
-- The bundled model is multi-head. Its auxiliary head flags meta-discussion and documentation that quotes injection text. Turn the multi-head rule on with `tier2_config={"multihead": MultiheadConfig(main_threshold=..., aux_threshold=...)}`: a chunk then blocks only when its main score >= `main_threshold` and its aux score < `aux_threshold`. The result reports `tier2_aux_score` and `tier2_multihead_blocked`.
-- The bundled model carries calibrated defaults in its `classifier_config.json` (`high_risk_threshold` 0.64 at temperature 2.41). They override library defaults when the model loads.
+- The bundled model is multi-head (variant `jbv2-mh-grid-agpjb2pinstr-s2` since 0.9.3; it still lives in the `minilm-multihead-v5` folder so existing paths keep working). Its auxiliary head flags meta-discussion and documentation that quotes injection text.
+- The bundled model carries calibrated defaults in its `classifier_config.json` (`high_risk_threshold` 0.52 at temperature 2.41). They override library defaults when the model loads. Thresholds are model-specific: 0.64 was right for the previous model, not this one.
+- Multi-head mode is off by default; Tier 2 then blocks at `high_risk_threshold`. To turn it on, pass a preset as `tier2_config={"multihead": MultiheadConfig(main_threshold=..., aux_threshold=...)}`: a chunk then blocks when its main score >= `main_threshold` and its aux score < `aux_threshold`, and the result reports `tier2_aux_score` and `tier2_multihead_blocked`. Presets tuned for this model: High 0.77/0.325, Medium 0.88/0.325, Low 0.94/0.30. They're also in `classifier_config.json` under `multihead_presets`, but defender doesn't load them for you.
 
 ### Optional SFE preprocessor
 
@@ -239,7 +240,7 @@ A failed chunk is skipped (fail open), and `result.tier3.errored` and `coverage_
 | Option | Default | What it does |
 |---|---|---|
 | `allow_override` | `True` | Cascade: whether a Tier-3 `allow` can undo a Tier-2 block. `False`: Tier 3 only adds blocks. `{"max_tier2_score": x}`: only when Tier 2's undamped score is below `x`. A general-purpose LLM can be talked into `allow`, so prefer `False` or a cap. Defender warns once when it's `True` with a provider from `create_llm_tier3_provider` or `create_openai_compatible_tier3_provider`. |
-| `on_error` | cascade `"tier2"`, tier3_only `"allow"` | What a failure (error, timeout, invalid verdict) does. `"tier2"` keeps Tier 2's verdict. `"allow"` treats it as an allow. `"block"` blocks: in cascade when Tier 2 rated the payload medium or higher; in tier3_only when any chunk failed (and `on_oversize` then defaults to `"scan_anyway"`). A missing provider fails closed too. `"tier2"` isn't valid in tier3_only: defender warns and uses `"allow"`. |
+| `on_error` | cascade `"tier2"`, tier3_only `"allow"` | What a failure (error, timeout, invalid verdict) does. `"tier2"` keeps Tier 2's verdict. `"allow"` treats it as an allow. `"block"` blocks: in cascade when Tier 2 rated the payload medium or higher (with the bundled model Tier 2 rarely reports `medium`: its band is [0.5, 0.52)); in tier3_only when any chunk failed (and `on_oversize` then defaults to `"scan_anyway"`). A missing provider fails closed too. `"tier2"` isn't valid in tier3_only: defender warns and uses `"allow"`. |
 | `decide` | none | `decide(Tier3DecisionInput) -> "block" \| "allow" \| "default"`, called once per call after Tier 3 ran or failed. Replaces `allow_override` and `on_error` for that call. Gets metadata only (never content). Must be synchronous. A raise or bad return means `"default"`. It can't undo a Tier 1 detection, override `on_oversize`, or block when `block_high_risk=False`. |
 | `timeout_ms` | none | Per provider call, from when it gets a concurrency slot. An async provider is cancelled at the deadline (`ctx["deadline"]`); a sync one can't be interrupted. |
 | `max_concurrency` | unbounded | Max in-flight provider calls per instance, per event loop. Each sync `defend_tool_result` call runs its own loop, so the cap doesn't span threads that use the sync API. Set `timeout_ms` with it. |
@@ -284,7 +285,7 @@ defense = create_prompt_defense(
     annotate_boundary=False,  # True: wrap risky strings with [UD-…] tags (npm: annotateBoundary)
     sanitize_content=True,  # False: detect-and-gate; sanitized is the input verbatim
     tier2_fields=["subject", "body", "snippet"],  # optional: scope Tier 2 to these JSON keys (default: all strings)
-    tier2_config={"high_risk_threshold": 0.64},  # optional; defaults come from the bundled model's classifier_config.json
+    tier2_config={"high_risk_threshold": 0.52},  # optional; defaults come from the bundled model's classifier_config.json
     use_sfe=False,  # True, or {"threshold": 0.5, "predictor": ...}: SFE preprocessing before Tier 2
     enable_tier3=False,
     defender_mode="cascade",  # or "tier3_only"; ignored unless enable_tier3
