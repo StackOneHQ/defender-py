@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from ..utils.lfs import assert_not_lfs_pointer
+
 _logger = logging.getLogger(__name__)
 
 
@@ -195,6 +197,7 @@ class OnnxClassifier:
                 self._count_tokenizer.no_padding()
 
                 onnx_path = str(Path(self._model_path) / "model_quantized.onnx")
+                assert_not_lfs_pointer(onnx_path)  # clear error instead of a protobuf parse failure
                 self._session = ort.InferenceSession(onnx_path)
             except Exception as e:
                 _logger.warning("[defender] ONNX model failed to load: %s", e)

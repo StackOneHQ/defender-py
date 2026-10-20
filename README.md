@@ -403,7 +403,10 @@ Otherwise the default list applies: `name`, `description`, `content`, `title`, `
 
 ## Development
 
+The model files are stored with [Git LFS](https://git-lfs.com/). Install git-lfs before cloning, or run `git lfs pull` in an existing clone. Without it the models are small pointer files: the build refuses to package them, and loading one fails with a message saying so.
+
 ```bash
+git lfs install
 uv sync --group dev
 uv run pytest
 ```

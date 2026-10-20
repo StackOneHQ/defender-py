@@ -9,6 +9,7 @@ from threading import Lock
 from typing import Any, Protocol
 
 from ..config import DANGEROUS_KEYS, MAX_TRAVERSAL_DEPTH
+from ..utils.lfs import assert_not_lfs_pointer
 
 _logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ def get_default_predictor(model_path: str | None = None) -> SfePredictor | None:
             return None
 
         try:
+            assert_not_lfs_pointer(resolved)  # clear message through the fail-open warning below
             model = fasttext.load_model(resolved)
             predictor: SfePredictor = _FastTextPredictor(model)
             _predictor_cache[resolved] = predictor
