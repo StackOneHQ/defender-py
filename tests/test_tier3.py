@@ -288,6 +288,28 @@ class TestTier3InputPythonTypes:
         assert r.tier3.skip_reason == "Tier 3 serialization error: boom"
 
 
+class TestTier3OversizedPythonTypes:
+    @pytest.mark.parametrize(
+        "big",
+        [lambda n: set(range(n)), lambda n: b"x" * n, lambda n: MappingProxyType(dict.fromkeys(range(n)))],
+        ids=["set", "bytes", "mapping"],
+    )
+    def test_not_copied_and_flagged_oversize(self, big):
+        judge = _Judge()
+        defense = create_prompt_defense(
+            config={"traversal": {"max_size": 1000}},
+            enable_tier1=False,
+            enable_tier2=False,
+            block_high_risk=True,
+            enable_tier3=True,
+            defender_mode="tier3_only",
+            tier3={"provider": judge, "on_oversize": "block"},
+        )
+        r = _run(defense, {"name": "x", "big": big(5000)})
+        assert not r.allowed
+        assert r.coverage_degraded is True
+
+
 class TestTier3OnlyOutcomes:
     def test_partial_chunk_failure_notes_and_flags(self):
         class Flaky(_Judge):
@@ -311,7 +333,7 @@ class TestTier3OnlyOutcomes:
                 self.calls.append(text)
                 if "EVIL" in text:
                     return {"decision": "block", "score": 0.6}
-                return {"decision": "allow", "score": 0.4}
+                return {"decision": "allow", "score": 0.9}
 
         r = _run(_tier3_only(Mixed(), max_text_length=60), {"a": "x " * 40, "b": "EVIL"})
         assert r.tier3.decision == "block"

@@ -177,17 +177,38 @@ def _estimate_size(v: Any) -> int:
         return 2 + max(0, len(v) - 1)
     if isinstance(v, dict):
         return 2 + sum(_utf16_len(str(k)) + 3 for k in v) + max(0, len(v) - 1)
+    if isinstance(v, _Oversized):
+        return v.size
     return 0
 
 
-def _normalize(v: Any) -> Any:
+class _Oversized:
+    """Stands in for a value too large to convert; its size trips the byte meter."""
+
+    __slots__ = ("size",)
+
+    def __init__(self, size: int):
+        self.size = size
+
+
+def _normalize(v: Any, limit: int) -> Any:
     """Map Python-only types onto the JSON shapes the TS port handles, so their text is reviewed.
 
     Mappings and dataclasses become dicts; sets and other sequences become lists; bytes that
     decode as UTF-8 become text (other bytes stay binary). Anything else is reviewed as ``str(v)``.
+    A value longer than ``limit`` isn't copied: it becomes an ``_Oversized`` that trips the meter.
     """
     if v is None or isinstance(v, (str, bool, int, float, list, tuple, dict)):
         return v
+    size = (
+        v.nbytes
+        if isinstance(v, memoryview)
+        else len(v)
+        if isinstance(v, (bytes, bytearray, Mapping, AbstractSet, Sequence))
+        else 0
+    )
+    if size > limit:
+        return _Oversized(size)
     if isinstance(v, _BINARY):
         try:
             return bytes(v).decode("utf-8")
@@ -306,7 +327,7 @@ def _sum_string_content(v: Any, depth: int, meter: _Meter) -> int:
     """String-leaf content as the serializer emits it (UTF-16 units, line breaks excluded)."""
     if depth > MAX_TRAVERSAL_DEPTH:
         return 0
-    v = _normalize(v)
+    v = _normalize(v, meter.limit)
     if not meter.add(v):
         return 0
     if isinstance(v, str):
@@ -372,7 +393,7 @@ class _Serializer:
             return
         if self.meter.hit:
             return
-        v = _normalize(v)
+        v = _normalize(v, self.meter.limit)
         if not self.meter.add(v):
             self._degrade()
             return
@@ -503,7 +524,7 @@ class _Serializer:
                 else self.cap
             )
             self.used += 2 if emitted else 0  # the "\n\n" before this block (rolled back if empty)
-            record = _normalize(records[i])
+            record = _normalize(records[i], self.meter.limit)
             lines: list[str] = []
             prefix = f"[{i}]" if top_is_array and not isinstance(record, dict) else ""
             self.serialize(record, prefix, lines, 0, False, False)
@@ -523,7 +544,7 @@ def format_records_for_tier3(value: Any, depth_flag: dict[str, Any], max_chars: 
     emitted. Sets ``depth_flag["coverage_degraded"]`` on any drop and ``depth_flag["budget_exceeded"]``
     when content didn't fit (oversize).
     """
-    value = _normalize(value)
+    value = _normalize(value, max_size)
     top_is_array = _is_array(value)
     records = list(value) if top_is_array else [value]
     ser = _Serializer(depth_flag, max_chars, max_size)
