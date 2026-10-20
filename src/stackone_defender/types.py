@@ -90,17 +90,17 @@ class Tier3Verdict:
     raw: Any = None
     latency_ms: float | None = None
     usage: Tier3TokenUsage | None = None
+    # Set by the defender, never by a provider (like override_applied, override_suppressed, decided_by).
+    # A real Tier 3 failure: some tier3_only chunk failed, or the cascade call failed.
+    errored: bool | None = None
+    # Why the outcome isn't this verdict's alone (an oversize policy block, failed chunks). Redacted.
+    note: str | None = None
     # Model explanation. Untrusted: it can quote attacker text. Never feed it back to an agent.
     reason: str | None = None
     # The model refused, a content filter fired, or the reply was unusable. ``decision`` is then "block".
     refused: bool | None = None
     # Prompt version of a create_llm_tier3_provider provider ("custom" for a user prompt).
     prompt_version: str | None = None
-    # The fields below are set by the defender, never by a provider.
-    # A real Tier 3 failure: some tier3_only chunk failed, or the cascade call failed.
-    errored: bool | None = None
-    # Why the outcome isn't this verdict's alone (an oversize policy block, failed chunks). Redacted.
-    note: str | None = None
     # Cascade: the allow removed a Tier-2 threat.
     override_applied: bool | None = None
     # Cascade: the allow was ignored because of allow_override.

@@ -217,6 +217,8 @@ def build_tier3_messages(prompt: Prompt, text: str, ctx: Mapping[str, Any] | Non
         if joined.count(content_open) != 1 or joined.count(content_close) != 1:
             raise ValueError("Tier 3 prompt builder must include wrapped_content exactly once")
         return messages
+    # Validate here too: a direct call with a template missing {{content}} would review nothing.
+    validate_prompt_template(prompt)
     system, user = _template_parts(prompt)
     values = {"content": content, "toolName": tool_name, "userGoal": wrapped_goal, "toolDescription": wrapped_desc}
     # Collapse the blank lines empty optional fields leave behind, without touching the content.

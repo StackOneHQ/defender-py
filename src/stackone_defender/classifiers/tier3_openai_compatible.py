@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
+from ..utils.text import JS_WS
 from .tier3_llm_provider import (
     VERDICT_JSON_SCHEMA,
     LlmCompletionRequest,
@@ -28,7 +29,9 @@ _SAFE_CODE_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 # Error codes that mean the provider refused the content (moderation), which the attacker can cause.
 _REFUSAL_CODES = frozenset({"content_filter", "content_policy_violation", "invalid_prompt"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-_THINK_RE = re.compile(r"^\s*<think>[\s\S]*?</think>\s*", re.IGNORECASE)
+_THINK_RE = re.compile(f"^[{JS_WS}]*<think>[\\s\\S]*?</think>[{JS_WS}]*", re.IGNORECASE)
+_RESPONSE_FORMATS = ("json_schema", "json_object", "none")
+_HEADER_BAD_RE = re.compile(r"[\r\n\x00]")
 
 
 def _safe_code(value: Any) -> str | None:
@@ -53,6 +56,7 @@ def _chat_completions_url(base_url: str, allow_insecure_http: bool) -> str:
     try:
         parts = urlsplit(base_url)
         host = (parts.hostname or "").lower()
+        _ = parts.port  # raises on a bad port, which would otherwise fail on every call
     except ValueError:
         raise ValueError("create_openai_compatible_tier3_provider: `base_url` is not a valid URL") from None
     if not parts.scheme or not parts.netloc:
@@ -101,7 +105,8 @@ def create_openai_compatible_tier3_provider(
     - ``max_tokens``: default 300, sent as ``max_completion_tokens`` unless ``legacy_max_tokens``.
     - ``temperature``: not sent unless set (some reasoning models reject it).
     - ``retries``: extra attempts on 429, 5xx and network errors while the deadline allows. Default 1.
-    - ``client``: an ``httpx.AsyncClient`` to reuse (for connection pooling, proxies or tests).
+    - ``client``: an ``httpx.AsyncClient`` to reuse. Recommended in production: without it each call
+      opens a new client (no connection pooling) that ignores proxy settings from the environment.
     - ``allow_insecure_http``: allow plain http to a non-local host. Tool content and the key then
       travel unencrypted.
 
@@ -116,9 +121,21 @@ def create_openai_compatible_tier3_provider(
     if not base_url or not model:
         raise ValueError("create_openai_compatible_tier3_provider: `base_url` and `model` are required")
     url = _chat_completions_url(base_url, allow_insecure_http)
-    retries = max(0, int(retries))
+    if response_format not in _RESPONSE_FORMATS:
+        raise ValueError(
+            'create_openai_compatible_tier3_provider: `response_format` must be "json_schema", "json_object" or "none"'
+        )
+    if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+        raise ValueError("create_openai_compatible_tier3_provider: `retries` must be an int >= 0")
     req_headers = {"Content-Type": "application/json", **(headers or {})}
+    for name, value in req_headers.items():
+        if not isinstance(name, str) or not isinstance(value, str) or _HEADER_BAD_RE.search(name + value):
+            raise ValueError(
+                "create_openai_compatible_tier3_provider: header names and values must be single-line strings"
+            )
     if api_key:
+        # One Authorization header: a differently-cased duplicate would be sent too.
+        req_headers = {k: v for k, v in req_headers.items() if k.lower() != "authorization"}
         req_headers["Authorization"] = f"Bearer {api_key}"
 
     async def complete(req: LlmCompletionRequest) -> Mapping[str, Any]:
@@ -139,13 +156,17 @@ def create_openai_compatible_tier3_provider(
         elif response_format == "json_object":
             body["response_format"] = {"type": "json_object"}
 
-        def can_retry(attempt: int) -> bool:
-            return attempt < retries and time.time() + 0.25 < deadline
+        def retry_delay(attempt: int) -> float | None:
+            """The backoff before the next attempt, or None when it wouldn't fit the deadline."""
+            delay = 0.25 * (attempt + 1)
+            return delay if attempt < retries and time.time() + delay + 0.25 < deadline else None
 
         async def post(http: Any) -> Mapping[str, Any]:
             attempt = 0
             while True:
-                remaining = max(0.001, deadline - time.time())
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError("request timed out")
                 try:
                     # Never follow redirects: they would carry the key and the tool content elsewhere.
                     # httpx's own default timeout is 5s; the deadline is the only limit.
@@ -162,9 +183,10 @@ def create_openai_compatible_tier3_provider(
                 except (TimeoutError, httpx.TimeoutException):
                     raise TimeoutError("request timed out") from None
                 except httpx.HTTPError as err:
-                    if can_retry(attempt):
+                    delay = retry_delay(attempt)
+                    if delay is not None:
                         attempt += 1
-                        await asyncio.sleep(0.25 * attempt)
+                        await asyncio.sleep(delay)
                         continue
                     # Network error text can include the URL; report only the error type.
                     raise ConnectionError(f"network error {type(err).__name__}") from None
@@ -176,16 +198,19 @@ def create_openai_compatible_tier3_provider(
                     code = _error_code_of(parsed)
                     if code in _REFUSAL_CODES:
                         return {"text": "", "refused": True}
-                    if (resp.status_code == 429 or resp.status_code >= 500) and can_retry(attempt):
+                    delay = retry_delay(attempt) if resp.status_code == 429 or resp.status_code >= 500 else None
+                    if delay is not None:
                         attempt += 1
-                        await asyncio.sleep(0.25 * attempt)
+                        await asyncio.sleep(delay)
                         continue
                     raise _HttpError(resp.status_code, code)
                 return _read_choice(parsed)
 
         if client is not None:
             return await post(client)
-        async with httpx.AsyncClient() as http:
+        # Like fetch, ignore proxy and netrc settings from the environment. Pass `client` to pool
+        # connections or to use a proxy.
+        async with httpx.AsyncClient(trust_env=False) as http:
             return await post(http)
 
     return create_llm_tier3_provider(complete=complete, prompt=prompt, parse=parse)

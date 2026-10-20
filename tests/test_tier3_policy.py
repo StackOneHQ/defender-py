@@ -459,3 +459,114 @@ class TestOpenAICompatibleProvider:
     def test_localhost_http_allowed(self):
         create_openai_compatible_tier3_provider(base_url="http://localhost:11434/v1", model="m")
         create_openai_compatible_tier3_provider(base_url="http://127.0.0.1:8000", model="m")
+
+
+class TestReviewRegressions:
+    def test_cancelled_queued_call_does_not_free_a_slot(self):
+        rec = Recorder(delay=0.2)
+        defense = _t3only(rec, max_concurrency=1, timeout_ms=5000)
+
+        async def main():
+            holder = asyncio.create_task(defense.defend_tool_result_async({"a": "1"}, "t"))
+            await asyncio.sleep(0.02)
+            queued = [asyncio.create_task(defense.defend_tool_result_async({"a": str(i)}, "t")) for i in range(3)]
+            await asyncio.sleep(0.02)
+            for t in queued:
+                t.cancel()
+            await asyncio.gather(*queued, return_exceptions=True)
+            await holder
+            sem = defense._t3._semaphores[asyncio.get_running_loop()]
+            assert sem._value == 1
+            rec.max_in_flight = 0
+            await defense.defend_tool_results_async([{"value": {"a": str(i)}, "tool_name": "t"} for i in range(4)])
+
+        _run(main())
+        assert rec.max_in_flight == 1
+
+    def test_refusal_without_decision_blocks(self):
+        class Refuses:
+            def classify(self, text, *, ctx=None):
+                return {"refused": True}
+
+        r = _run(_t3only(Refuses()).defend_tool_result_async({"a": "b"}, "t"))
+        assert not r.allowed
+        assert r.tier3.refused is True
+
+    def test_lone_surrogate_in_reason_is_replaced(self):
+        provider = create_llm_tier3_provider(complete=lambda req: '{"decision":"allow","reason":"\\ud800x"}')
+        r = _run(_t3only(provider).defend_tool_result_async({"a": "b"}, "t"))
+        r.tier3.reason.encode("utf-8")
+        r.tier3.raw.encode("utf-8")
+
+    def test_build_messages_validates_template(self):
+        from stackone_defender import build_tier3_messages
+
+        with pytest.raises(ValueError):
+            build_tier3_messages({"system": "s", "user": "no content slot"}, "x")
+
+
+class TestRedactionRegressions:
+    @pytest.mark.parametrize(
+        ("text", "secret"),
+        [
+            ("failed https://user:p@ss@host.example.com/v1", "p@ss"),
+            ("{'Authorization': 'Bearer abcdefghijklmnop', 'X-Api-Key': 'zzzzzzzzzz'}", "zzzzzzzzzz"),
+            (
+                "Headers({'authorization': 'Bearer sk-live-abcdef12345', 'api-key': 'k3y-with-dashes'})",
+                "k3y-with-dashes",
+            ),
+        ],
+    )
+    def test_no_leak(self, text, secret):
+        from stackone_defender.utils.redact import redact_error_text
+
+        assert secret not in redact_error_text(text)
+
+
+class TestOpenAIOptionValidation:
+    @pytest.mark.parametrize(
+        "kw",
+        [
+            {"base_url": "http://localhost:abc/v1"},
+            {"response_format": "json"},
+            {"retries": -1},
+            {"retries": True},
+            {"headers": {"X-Trace": "a\r\nInjected: 1"}},
+        ],
+    )
+    def test_rejected_at_construction(self, kw):
+        with pytest.raises(ValueError):
+            create_openai_compatible_tier3_provider(**{"base_url": "https://llm.example.com/v1", "model": "m", **kw})
+
+    def test_single_authorization_header(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request.headers.get_list("authorization"))
+            return httpx.Response(200, json=_reply('{"decision":"allow","reason":"r"}'))
+
+        _run(_openai(handler, headers={"authorization": "Bearer other"}).classify("x"))
+        assert seen == [["Bearer sk-test-key-123456"]]
+
+    def test_expired_deadline_sends_nothing(self):
+        calls = []
+
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(200, json={})
+
+        with pytest.raises(TimeoutError):
+            _run(_openai(handler).classify("x", ctx={"deadline": time.time() - 1}))
+        assert calls == []
+
+    def test_retry_backoff_stays_inside_deadline(self):
+        calls = []
+
+        def handler(request):
+            calls.append(time.time())
+            return httpx.Response(503, json={})
+
+        deadline = time.time() + 0.4
+        with pytest.raises(Exception, match="HTTP 503"):
+            _run(_openai(handler, retries=5).classify("x", ctx={"deadline": deadline}))
+        assert calls[-1] < deadline

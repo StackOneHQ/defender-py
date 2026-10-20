@@ -30,7 +30,7 @@ from ..types import (
     Tier3Verdict,
 )
 from ..utils.redact import describe_error, redact_error_text
-from ..utils.text import js_typeof, truncate
+from ..utils.text import from_utf16, js_typeof, truncate
 
 _logger = logging.getLogger("stackone_defender.core.prompt_defense")
 
@@ -248,6 +248,11 @@ class Tier3Policy:
         else:
             return Tier3Skip(skip_reason=f"Tier 3 provider returned non-object verdict: {js_typeof(verdict)}")
         decision = raw.get("decision")
+        refused = raw.get("refused")
+        refused = refused if isinstance(refused, bool) else None
+        # A refusal is attacker-triggerable, so it blocks even without a valid decision.
+        if refused is True:
+            decision = "block"
         if decision not in ("block", "allow"):
             # Don't echo the value: it is provider output and may quote content.
             return Tier3Skip(
@@ -257,20 +262,19 @@ class Tier3Policy:
                 )
             )
         reason = raw.get("reason")
-        refused = raw.get("refused")
-        refused = refused if isinstance(refused, bool) else None
         score = raw.get("score")
         score_ok = _number(score) and math.isfinite(score) and 0 <= score <= 1
         prompt_version = _opt(raw, "prompt_version", "promptVersion")
         latency = _opt(raw, "latency_ms", "latencyMs")
+        raw_out = raw.get("raw") if self.include_raw else None
         return Tier3Verdict(
-            # A refusal is attacker-triggerable, so it never reads as an allow.
-            decision="block" if refused is True else decision,
+            decision=decision,
             score=float(score) if score_ok else None,
-            raw=raw.get("raw") if self.include_raw else None,
+            # Model text can echo a lone surrogate, which breaks UTF-8 logging downstream.
+            raw=from_utf16(raw_out) if isinstance(raw_out, str) else raw_out,
             latency_ms=float(latency) if _number(latency) else None,
             usage=self._usage(raw.get("usage")),
-            reason=truncate(reason, _MAX_REASON_CHARS) if isinstance(reason, str) else None,
+            reason=from_utf16(truncate(reason, _MAX_REASON_CHARS)) if isinstance(reason, str) else None,
             refused=refused,
             prompt_version=prompt_version if isinstance(prompt_version, str) else None,
         )
@@ -352,15 +356,16 @@ class Tier3Policy:
         timeout_s = self.timeout_ms / 1000 if self.timeout_ms is not None else None
         sem = self._semaphore()
         stop_task = asyncio.ensure_future(stop.wait()) if stop is not None else None
-        released = False
+        # True while this call holds a concurrency slot.
+        held = False
         # Held until the provider settled AND this call's outcome is handled, so a stop_on_first_block
         # stop lands before a queued call can take the slot.
         holds = 2
 
         def release() -> None:
-            nonlocal released
-            if sem is not None and not released:
-                released = True
+            nonlocal held
+            if sem is not None and held:
+                held = False
                 sem.release()
 
         def release_one() -> None:
@@ -379,14 +384,14 @@ class Tier3Policy:
                 try:
                     await asyncio.wait(waiters, timeout=wait_s, return_when=asyncio.FIRST_COMPLETED)
                 finally:
+                    # Also on our own cancellation: only a slot actually acquired is released later.
                     if not acquire.done():
                         acquire.cancel()
-                got_slot = acquire.done() and not acquire.cancelled() and acquire.exception() is None
-                if got_slot and stop is not None and stop.is_set():
+                    held = acquire.done() and not acquire.cancelled() and acquire.exception() is None
+                if held and stop is not None and stop.is_set():
                     release()
                     return CallOutcome(kind="aborted")
-                if not got_slot:
-                    released = True  # nothing to release
+                if not held:
                     if stop is not None and stop.is_set():
                         return CallOutcome(kind="aborted")
                     return self._failed(

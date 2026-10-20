@@ -167,10 +167,14 @@ result = await defense.defend_tool_result_async(
 Around any other LLM, `complete` gets a request with `messages` (system + user), `deadline` and `json_schema`, and returns the reply text (sync or async):
 
 ```python
+import time
+
 from stackone_defender import create_llm_tier3_provider
 
 async def complete(req):
-    reply = await my_llm.chat(req.messages, timeout=req.deadline)
+    # req.deadline is absolute (time.time() seconds), or None when tier3.timeout_ms isn't set.
+    timeout = req.deadline - time.time() if req.deadline else 30
+    reply = await my_llm.chat(req.messages, timeout=timeout)
     return reply.text  # or {"text": ..., "refused": True} / {"text": ..., "score": p_block}
 
 judge = create_llm_tier3_provider(complete=complete)

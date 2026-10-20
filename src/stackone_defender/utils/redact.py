@@ -31,11 +31,13 @@ _A = re.ASCII
 
 _RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*"), "[redacted-private-key]"),
-    # URLs of any scheme: keep scheme + host only (drops userinfo, path and query).
-    (re.compile(rf"\b([a-z][a-z0-9+.-]*)://(?:[^@/{JS_WS}?#]*@)?([^/{JS_WS}?#]+){_NS}*", _AI), r"\1://\2"),
+    # URLs of any scheme: keep scheme + host only (drops userinfo, path and query). Userinfo runs to
+    # the last `@`, so a password containing `@` doesn't leak into the host.
+    (re.compile(rf"\b([a-z][a-z0-9+.-]*)://(?:[^/{JS_WS}?#]*@)?([^/@{JS_WS}?#]+){_NS}*", _AI), r"\1://\2"),
     # Bearer/Basic are always followed by a credential. "Token"/"Digest" are also ordinary words, so
     # they need a credential-shaped value.
-    (re.compile(rf"\b(Bearer|Basic){_S}+{_NS}+", _AI), r"\1 [redacted]"),
+    # Stop at a quote or comma, so the next pair in a dict repr stays matchable.
+    (re.compile(rf"\b(Bearer|Basic){_S}+[^{JS_WS}'\",]+", _AI), r"\1 [redacted]"),
     (re.compile(rf"\b(Token|Digest){_S}+{_CREDENTIAL}", _AI), r"\1 [redacted]"),
     (
         re.compile(rf"\b(authorization|proxy-authorization)({_S}*[:=]{_S}*)(?:[A-Za-z]+{_S}+)?{_CREDENTIAL}", _AI),
