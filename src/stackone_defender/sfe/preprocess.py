@@ -31,11 +31,9 @@ class DropDecision:
 class SfePredictor(Protocol):
     """FastText-compatible predictor interface."""
 
-    def predict(self, text: str) -> DropDecision:
-        ...
+    def predict(self, text: str) -> DropDecision: ...
 
-    def predict_batch(self, texts: list[str]) -> list[DropDecision]:
-        ...
+    def predict_batch(self, texts: list[str]) -> list[DropDecision]: ...
 
 
 @dataclass
@@ -194,7 +192,7 @@ def _extract_fields(
         for i, item in enumerate(obj):
             out.extend(_extract_fields(item, depth_flag, path, depth, stack_depth + 1, obj, i))
     else:
-        val = "" if obj is None else str(obj)[:500]
+        val = "" if obj is None else _js_head(str(obj), 500)
         out.append(
             _Field(raw_path=path, parent=parent, key=key, value_type=_value_type(obj), value_truncated=val, depth=depth)
         )
@@ -203,16 +201,22 @@ def _extract_fields(
 
 def _cap_path(path: str) -> str:
     # Keep the tail, in UTF-16 units like the TS port.
-    if len(path) <= _MAX_PATH_CHARS or utf16_len(path) <= _MAX_PATH_CHARS:
+    if utf16_len(path) <= _MAX_PATH_CHARS:
         return path
     return from_utf16(to_utf16(path)[-_MAX_PATH_CHARS:])
 
 
+def _js_head(s: str, n: int) -> str:
+    """JS `s.slice(0, n)`: the first n UTF-16 units."""
+    return from_utf16(to_utf16(s[:n])[:n])
+
+
 def _field_to_text(field: _Field) -> str:
     path_tokens = field.raw_path.replace(".", " ").replace("_", " ").replace("-", " ")
-    val = field.value_truncated[:200]
+    val = _js_head(field.value_truncated, 200)
     text = f"{field.value_type} d{field.depth} {path_tokens} {val}"
-    return text.replace("\r", " ").replace("\n", " ")
+    # from_utf16 turns lone surrogates into U+FFFD; the FastText binding raises on them.
+    return from_utf16(text.replace("\r", " ").replace("\n", " "))
 
 
 def _filter_drops(
@@ -230,7 +234,8 @@ def _filter_drops(
         # depth only gates the cap, not path construction.
         dropped = drops.get(id(obj), ())
         return [
-            _DROPPED if i in dropped else _filter_drops(item, drops, depth_flag, depth + 1) for i, item in enumerate(obj)
+            _DROPPED if i in dropped else _filter_drops(item, drops, depth_flag, depth + 1)
+            for i, item in enumerate(obj)
         ]
 
     if isinstance(obj, dict):

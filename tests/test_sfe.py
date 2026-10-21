@@ -133,7 +133,9 @@ def test_a_key_containing_index_dot_or_empty_cannot_stand_in_for_another_leaf():
 def test_keeps_a_shared_objects_field_if_any_path_to_it_keeps_it():
     class _MetaPredictor:
         def predict_batch(self, texts):
-            return [{"label": "drop", "prob": 0.95} if " meta " in t else {"label": "pass", "prob": 0.99} for t in texts]
+            return [
+                {"label": "drop", "prob": 0.95} if " meta " in t else {"label": "pass", "prob": 0.99} for t in texts
+            ]
 
     shared = {"note": _INJECTION}
     result = sfe_preprocess({"meta": {"x": shared}, "body": {"x": shared}}, {"predictor": _MetaPredictor()})
@@ -156,3 +158,20 @@ def test_bounds_the_classifier_text_when_a_payload_nests_many_long_keys():
     result = sfe_preprocess(node, {"predictor": _Recording()})
     assert max(seen) < 300
     assert len(result.dropped) == 500
+
+
+def test_classifier_text_counts_utf16_units_and_has_no_lone_surrogates():
+    seen: list[str] = []
+
+    class _Recording(_IdPredictor):
+        def predict_batch(self, texts):
+            seen.extend(texts)
+            return super().predict_batch(texts)
+
+    sfe_preprocess(
+        {"\U0001f600" * 200: "x", "a\ud800b": "y\udc00z", "v": "\U0001f600" * 150}, {"predictor": _Recording()}
+    )
+    path_text, surrogate_text, value_text = seen
+    assert path_text.count("\U0001f600") == 128  # last 256 units, as TS slice(-256)
+    assert "�" in surrogate_text and not any(0xD800 <= ord(c) <= 0xDFFF for c in surrogate_text)
+    assert value_text.count("\U0001f600") == 100  # first 200 units, as TS slice(0, 200)
