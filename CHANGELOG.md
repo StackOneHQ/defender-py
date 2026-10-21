@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.4](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.3...stackone-defender-v0.9.4) (2026-10-21)
+
+
+### Bug Fixes
+
+* **ENG-3542:** drop SFE fields per element in list responses ([#48](https://github.com/StackOneHQ/defender-py/issues/48)) ([19f84d6](https://github.com/StackOneHQ/defender-py/commit/19f84d65b83eaa2fd85c810eef75ce90527e16a5))
+
 ## [0.9.3](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.2...stackone-defender-v0.9.3) (2026-10-20)
 
 
