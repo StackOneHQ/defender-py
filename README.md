@@ -11,7 +11,7 @@
     <a href="https://pypi.org/project/stackone-defender/"><img src="https://img.shields.io/pypi/v/stackone-defender?style=flat-square&color=047B43&label=pypi" alt="PyPI version" /></a>
     <a href="https://github.com/StackOneHQ/defender-py/releases"><img src="https://img.shields.io/github/v/release/StackOneHQ/defender-py?style=flat-square&color=047B43&label=release" alt="latest GitHub release" /></a>
     <a href="https://github.com/StackOneHQ/defender-py/stargazers"><img src="https://img.shields.io/github/stars/StackOneHQ/defender-py?style=flat-square&color=047B43" alt="GitHub stars" /></a>
-    <a href="./LICENSE"><img src="https://img.shields.io/pypi/l/stackone-defender?style=flat-square&color=047B43" alt="License" /></a>
+    <a href="https://github.com/StackOneHQ/defender-py/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/stackone-defender?style=flat-square&color=047B43" alt="License" /></a>
     <img src="https://img.shields.io/badge/Python-3.11+-047B43?style=flat-square" alt="Python 3.11+" />
     <a href="https://defender.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=badge"><img src="https://img.shields.io/badge/site-defender.stackone.com-047B43?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iI2ZmZiI+PHBhdGggZD0iTTEyIDFMMyA1djZjMCA1LjI1IDMuOCAxMC4xIDkgMTEgNS4yLS45IDktNS43NSA5LTExVjVsLTktNHoiLz48L3N2Zz4=" alt="Defender site" /></a>
   </p>
