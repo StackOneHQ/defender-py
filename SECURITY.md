@@ -4,7 +4,7 @@
 
 Please **do not** open public GitHub issues for security reports. Report privately in one of these ways:
 
-- [GitHub private vulnerability reporting](https://github.com/StackOneHQ/stackone-defender/security/advisories/new)
+- [GitHub private vulnerability reporting](https://github.com/StackOneHQ/defender-py/security/advisories/new)
 - Email **security@stackone.com**
 
 Please include:
