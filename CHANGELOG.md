@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.5](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.4...stackone-defender-v0.9.5) (2026-10-26)
+
+
+### Documentation
+
+* **ENG-3665:** add MAINTAINERS.md and SECURITY.md ([#51](https://github.com/StackOneHQ/defender-py/issues/51)) ([55835ef](https://github.com/StackOneHQ/defender-py/commit/55835ef98b68db5729295b0747be861c67581609))
+
 ## [0.9.4](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.3...stackone-defender-v0.9.4) (2026-10-21)
 
 
