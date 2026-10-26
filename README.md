@@ -441,9 +441,9 @@ Defender is built and maintained by [StackOne](https://www.stackone.com?utm_sour
 - **Overview & benchmarks** — [stackone.com/platform/prompt-injection-guard](https://www.stackone.com/platform/prompt-injection-guard/?utm_source=pypi&utm_medium=readme&utm_campaign=about)
 - **StackOne platform** — [stackone.com](https://www.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=about)
 - **TypeScript package** — [`@stackone/defender`](https://www.npmjs.com/package/@stackone/defender) ([StackOneHQ/defender](https://github.com/StackOneHQ/defender))
-- **Maintainers** — [MAINTAINERS.md](./MAINTAINERS.md)
-- **Security** — report vulnerabilities as described in [SECURITY.md](./SECURITY.md)
+- **Maintainers** — [MAINTAINERS.md](https://github.com/StackOneHQ/defender-py/blob/main/MAINTAINERS.md)
+- **Security** — report vulnerabilities as described in [SECURITY.md](https://github.com/StackOneHQ/defender-py/blob/main/SECURITY.md)
 
 ## License
 
-Apache-2.0 — see [LICENSE](./LICENSE).
+Apache-2.0 — see [LICENSE](https://github.com/StackOneHQ/defender-py/blob/main/LICENSE).
