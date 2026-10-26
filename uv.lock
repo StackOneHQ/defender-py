@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 
 [[package]]
@@ -646,7 +646,7 @@ wheels = [
 
 [[package]]
 name = "stackone-defender"
-version = "0.9.4"
+version = "0.9.5"
 source = { editable = "." }
 
 [package.optional-dependencies]
