@@ -1,31 +1,47 @@
 name: Release Please
 
 on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/release.yaml]
   push:
     branches: [main]
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   release-please:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'StackOneHQ/defender-py'
+    timeout-minutes: 10
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      release_sha: ${{ steps.release.outputs.sha }}
+      release_version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           config-file: .release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - uses: actions/checkout@v5
-        if: ${{ steps.release.outputs.pr || steps.release.outputs.release_created }}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: ${{ steps.release.outputs.pr }}
         with:
           fetch-depth: 0
+          persist-credentials: true # required to push uv.lock back to the release PR
           lfs: true # publish real model bytes; the build hook rejects LFS pointers
 
-      - uses: astral-sh/setup-uv@v7
-        if: ${{ steps.release.outputs.pr || steps.release.outputs.release_created }}
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        if: ${{ steps.release.outputs.pr }}
         with:
           python-version: "3.12" # match ci.yaml so `uv lock` resolves deterministically
           activate-environment: true
@@ -60,8 +76,124 @@ jobs:
             git push origin "HEAD:$branch"
           fi
 
-      - name: Build and publish
-        if: ${{ steps.release.outputs.release_created }}
+  build:
+    name: Test and build release
+    needs: release-please
+    # PRs exercise packaging without running release-please or granting publish access.
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'pull_request' || needs.release-please.outputs.release_created == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.release-please.outputs.release_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          lfs: true # package the real model files, never Git LFS pointers
+
+      - name: Verify release source
+        if: github.event_name == 'push'
         env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        run: uv build && uv publish
+          RELEASE_SHA: ${{ needs.release-please.outputs.release_sha }}
+        run: |
+          test "$(git rev-parse --verify 'HEAD^{commit}')" = "$RELEASE_SHA"
+          git merge-base --is-ancestor HEAD "$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Validate package metadata
+        id: package
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_VERSION: ${{ needs.release-please.outputs.release_version }}
+        run: |
+          uv --no-config run --no-project --python 3.12 python -I - <<'PYTHON'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          if project["name"] != "stackone-defender":
+              raise SystemExit("Unexpected package name")
+          version = project["version"]
+          if os.environ["EVENT_NAME"] == "push" and version != os.environ["RELEASE_VERSION"]:
+              raise SystemExit("Package version does not match the GitHub release")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"version={version}\n")
+          PYTHON
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Lint and test release source
+        run: |
+          uv run ruff check .
+          uv run pytest
+
+      - name: Build distributions
+        run: uv build --no-sources
+
+      - name: Verify wheel and source distribution installations
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            uv --no-config run --isolated --no-project --with "$artifact" python -I - <<'PYTHON'
+          import os
+          from importlib.metadata import version
+          from pathlib import Path
+          from stackone_defender import create_prompt_defense, get_default_model_path, get_default_sfe_model_path
+          assert version("stackone-defender") == os.environ["PACKAGE_VERSION"]
+          assert callable(create_prompt_defense)
+          assert (Path(get_default_model_path()) / "model_quantized.onnx").stat().st_size >= 1_000_000
+          assert Path(get_default_sfe_model_path()).stat().st_size >= 100_000
+          print("Installed stackone-defender", version("stackone-defender"))
+          PYTHON
+          done
+
+      - name: Upload tested distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish tested distributions
+    needs: [release-please, build]
+    if: >-
+      github.repository == 'StackOneHQ/defender-py' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: pypi
+      url: https://pypi.org/project/stackone-defender/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: false
+
+      - name: Download tested distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish with PyPI Trusted Publishing
+        run: uv publish --trusted-publishing always
