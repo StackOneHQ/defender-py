@@ -1,5 +1,12 @@
 <div align="center">
 
+  <a href="https://www.stackone.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/StackOneHQ/defender-py/7681a98241653a0025c549dad9654fe423aa64ff/assets/stackone-logo-dark.svg" />
+      <img src="https://raw.githubusercontent.com/StackOneHQ/defender-py/7681a98241653a0025c549dad9654fe423aa64ff/assets/stackone-logo-light.svg" alt="StackOne" width="180" />
+    </picture>
+  </a>
+
   <h1>Defender for Python</h1>
   <p><strong>Prompt injection defense for AI tool calls.</strong></p>
   <p>Scan untrusted tool output before your agent acts on it.</p>
@@ -20,6 +27,8 @@
 </div>
 
 ---
+
+Defender is an open source prompt injection defense library built and maintained by [StackOne](https://www.stackone.com).
 
 Emails, documents and pull requests can carry instructions that try to redirect an agent. Defender scans tool results before they enter the model's context, then returns a decision your application can enforce. Use it with MCP, CLI tools or direct function calls.
 
@@ -67,9 +76,9 @@ else:
     print(result.sanitized)
 ```
 
-`block_high_risk=True` enables blocking. `require_tier2=True` raises an error if the local classifier cannot load, so the example cannot silently lose that layer of detection.
+`block_high_risk=True` enables blocking. `require_tier2=True` raises an error if the local classifier cannot load.
 
-Always gate on `result.allowed`. The `sanitized` field contains a best-effort cleaned copy; an allowed result is not a guarantee that content is safe. Set `sanitize_content=False` to preserve the input verbatim while still checking the decision.
+Always gate on `result.allowed`. The `sanitized` field contains a best-effort cleaned copy; an allowed result is not a guarantee that content is safe. Set `sanitize_content=False` to disable sentence cleaning. Boundary annotation is controlled separately by `annotate_boundary`.
 
 For an agent loop, see the [integration example](#integration-example). Use [`defend_tool_results_async`](#await-defensedefend_tool_results_asyncitems) for async batch scanning.
 
@@ -77,10 +86,12 @@ For an agent loop, see the [integration example](#integration-example). Use [`de
 
 The `[onnx]` extra runs Tier 2 classification, which is enabled by default. Without it, Defender warns, sets `result.tier2_available = False` and falls back to pattern detection. Use `require_tier2=True` to raise instead, or `enable_tier2=False` for an intentional pattern-only setup.
 
+Inspect `tier2_skip_reason` for skipped analysis and `coverage_degraded` for reported coverage limits. `require_tier2` checks model loading; it does not turn every inference failure into an exception.
+
 <details>
 <summary>Optional dependencies for SFE and LLM review</summary>
 
-**SFE preprocessor (optional)**: add extras:
+**SFE preprocessor (optional)**: add extras, then enable `use_sfe=True`:
 
 ```bash
 pip install "stackone-defender[sfe]"
@@ -103,8 +114,8 @@ The `[sfe]` extra installs [`fasttext-ng`](https://pypi.org/project/fasttext-ng/
 ## How it works
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/StackOneHQ/defender/main/assets/demo-dark.svg" />
-  <img src="https://raw.githubusercontent.com/StackOneHQ/defender/main/assets/demo-light.svg" alt="Defender flow: poisoned tool output is sanitized and evaluated; high-risk content can be blocked before the LLM" width="900" />
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/StackOneHQ/defender-py/7681a98241653a0025c549dad9654fe423aa64ff/assets/readme-flow-dark.svg" />
+  <img src="https://raw.githubusercontent.com/StackOneHQ/defender-py/7681a98241653a0025c549dad9654fe423aa64ff/assets/readme-flow-light.svg" alt="Tool output goes through Defender's local checks and optional LLM review. Your application checks result.allowed, forwards result.sanitized when true, and withholds the output when false. Blocking must be enabled in your configuration." width="1080" />
 </picture>
 
 Defender has two local detection layers, with optional LLM review:
@@ -115,7 +126,7 @@ Defender has two local detection layers, with optional LLM review:
 | Tier 2: classifier | Text scored by the bundled MiniLM model. | Locally on CPU. |
 | Tier 3: LLM review | Uncertain cases or every tool result, depending on your policy. | At the model endpoint you configure. |
 
-### Tier 1: pattern detection (sync, ~1 ms)
+### Tier 1: pattern detection (synchronous)
 
 Detects (never rewrites) injection signals and records them as evidence:
 
@@ -130,11 +141,11 @@ Detects (never rewrites) injection signals and records them as evidence:
 Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 
 - Split text into sentences, pack to model-sized chunks, score chunks in batched ONNX calls
-- Catches paraphrased or novel injections missed by regex
+- Adds a learned detection signal alongside pattern matching
 - Uses chunked batch inference to bound memory on large payloads
-- The bundled model is multi-head (variant `jbv2-mh-grid-agpjb2pinstr-s2` since 0.9.3; it still lives in the `minilm-multihead-v5` folder so existing paths keep working). Its auxiliary head flags meta-discussion and documentation that quotes injection text.
-- The bundled model carries calibrated defaults in its `classifier_config.json` (`high_risk_threshold` 0.52 at temperature 2.41). They override library defaults when the model loads. Thresholds are model-specific: 0.64 was right for the previous model, not this one.
-- Multi-head mode is off by default; Tier 2 then rates a chunk high at `high_risk_threshold` (blocking also needs `block_high_risk=True`). To turn it on, pass a preset as `tier2_config={"multihead": MultiheadConfig(main_threshold=..., aux_threshold=...)}`: a chunk then blocks when its main score >= `main_threshold` and its aux score < `aux_threshold`, and the result reports `tier2_aux_score` and `tier2_multihead_blocked`. Presets tuned for this model: High 0.77/0.325, Medium 0.88/0.325, Low 0.94/0.30. They're also in `classifier_config.json` under `multihead_presets`, but defender doesn't load them for you.
+- The bundled model is multi-head (variant `jbv2-mh-grid-agpjb2pinstr-s2` since 0.9.3; it still lives in the `minilm-multihead-v5` folder so existing paths keep working). Its auxiliary head scores meta-discussion and documentation phrasing. The optional multi-head rule uses this signal to reduce false positives.
+- The bundled model carries calibrated defaults in its `classifier_config.json` (`highRiskThreshold` 0.52 at `temperatureT` 2.41). They populate Python's `high_risk_threshold` and override library defaults when the model loads. Thresholds are model-specific: 0.64 was right for the previous model, not this one.
+- Multi-head mode is off by default; Tier 2 then rates a chunk high at `high_risk_threshold` (blocking also needs `block_high_risk=True`). To turn it on, import `MultiheadConfig` from `stackone_defender` and pass a preset as `tier2_config={"multihead": MultiheadConfig(main_threshold=..., aux_threshold=...)}`: the rule flags a chunk when its main score >= `main_threshold` and its aux score < `aux_threshold`, and the result reports `tier2_aux_score` and `tier2_multihead_blocked`. Presets tuned for this model: High 0.77/0.325, Medium 0.88/0.325, Low 0.94/0.30. They're also in `classifier_config.json` under `multihead_presets`, but defender doesn't load them for you.
 
 ### Optional SFE preprocessor
 
@@ -145,16 +156,9 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 
 ### Benchmarks
 
-Tier 2 only, through the package pipeline at the default threshold 0.52; measured 2026-10-20:
+See the [Defender benchmark page](https://defender.stackone.com/defense-benchmark) for published evaluations, detector comparisons and methodology.
 
-| Benchmark | F1 | Precision | Recall | Samples |
-|-----------|-----|-----------|--------|---------|
-| Qualifire (held-out test split; the dataset's train split is used in training) | 0.828 | 0.857 | 0.800 | 751 |
-| xxz224 (out-of-distribution) | 0.814 | 0.989 | 0.691 | ~22.5k |
-| jayavibhav (unseen rows; other rows of this split are used in training) | 0.955 | 0.960 | 0.950 | ~60k |
-| **Average** | **0.865** | | | |
-
-The previous model scores 0.843 on the same sets and method. Earlier READMEs showed 0.908 from a different method (raw scores, best threshold picked per dataset), which isn't comparable. Latency is about 10 ms per call (p50 on a 2-vCPU container, short inputs); long inputs that split into several chunks take longer.
+Results depend on the model version, dataset, threshold and hardware. Some published runs use earlier Defender versions; check the version and method before comparing them with your deployment. Evaluate your own tool results to choose a threshold and measure latency.
 
 <a id="optional-tier-3--llm-adjudication-bring-your-own-llm"></a>
 
@@ -168,8 +172,10 @@ An LLM reviews the cases Tier 2 is unsure about (cascade), or every tool result 
 
 Two modes, selected via `defender_mode`:
 
-- **`"cascade"`** (default): Tier 1 → Tier 2 → Tier 3, with Tier 3 invoked only when the Tier 2 effective score falls in the gray band (default `[0.3, 0.85)`). The Tier 3 verdict overrides Tier 2 on the escalated chunk: a `block` forces a block, an `allow` rescues it. Outside the band defender skips the round trip.
-- **`"tier3_only"`**: skip Tier 2. Only the Tier 3 verdict decides. Tier 1 still fills `detections` but doesn't block. `sanitized` is the original content.
+- **`"cascade"`** (default): Tier 1 → Tier 2 → Tier 3, with Tier 3 invoked only when the Tier 2 effective score falls in the gray band (default `[0.3, 0.85)`). The Tier 3 verdict overrides Tier 2 on the escalated chunk: a `block` forces a block, an `allow` can undo a Tier 2 block, subject to `allow_override`. Outside the band defender skips the round trip.
+- **`"tier3_only"`**: skip Tier 2. Tier 3 verdicts and your error / oversize policies decide whether to block. Tier 1 still fills `detections` but doesn't block. `sanitized` is the original content.
+
+Set `OPENAI_API_KEY` and `OPENAI_MODEL` before running this example. Adjust `response_format` and token options to match your endpoint.
 
 ```python
 import os
@@ -179,7 +185,7 @@ from stackone_defender import create_openai_compatible_tier3_provider, create_pr
 judge = create_openai_compatible_tier3_provider(
     base_url="https://api.openai.com/v1",
     api_key=os.environ["OPENAI_API_KEY"],
-    model="gpt-4.1-mini",
+    model=os.environ["OPENAI_MODEL"],  # A model supported by your endpoint
 )
 defense = create_prompt_defense(
     block_high_risk=True,
@@ -249,7 +255,7 @@ Defender looks up the registered provider on every call, so registering after co
 
 **What the reviewer sees (`tier3_only`).** The tool result is serialized as `field: value` lines, one block per record, so a bare value keeps its field name (`status: create` rather than `create`, which reads like an instruction). Nested keys are dotted (`user.name: …`), list items are indexed (`items[0]: …`), and each line of a multi-line value keeps its prefix. A large list of only numbers collapses to `key: [N numbers]`. Keys are reviewed even when the value is a number, boolean, `None` or empty, because keys can carry injected text. Python-only types are reviewed too: mappings and dataclasses as objects, sets and other sequences as lists, UTF-8 `bytes` as text, and anything else as `str(value)`.
 
-The serialized text is split into chunks of at most `max_text_length` characters (lengths count UTF-16 code units, as in the TypeScript package). Neighbouring chunks overlap by up to 500 characters, so an injection cut at a chunk boundary still appears whole. All chunks are reviewed in parallel, and any blocking chunk blocks the result. `result.tier3_chunk_summary` reports `chunks`, `blocked` and `blocking_chunk`.
+The serialized text is split into chunks of at most `max_text_length` characters (lengths count UTF-16 code units, as in the TypeScript package). Neighbouring chunks overlap by up to 500 characters, reducing the chance that an injection is split across review windows. All chunks are reviewed in parallel, and any blocking chunk blocks the result. `result.tier3_chunk_summary` reports `chunks`, `blocked` and `blocking_chunk`.
 
 **Oversize (`on_oversize`).** Up to about `max_chunks` chunks are reviewed per tool result. Content beyond that is oversize, and `coverage_degraded` is `True`. Blocking below requires `block_high_risk=True`.
 
@@ -259,9 +265,9 @@ The serialized text is split into chunks of at most `max_text_length` characters
 
 In `"skip"` and `"scan_anyway"`, `tier3_chunk_summary.oversize` is `True`.
 
-A failed chunk is skipped (fail open), and `result.tier3.errored` and `coverage_degraded` are `True`. With a verdict, `result.tier3.note` says how many chunks failed; it also gives the reason for an `on_oversize` block when the provider allowed. When every chunk fails there's no verdict, and `result.tier3.skip_reason` gives the first failure.
+With the default `on_error="allow"`, a failed chunk is skipped (fail open), and `result.tier3.errored` and `coverage_degraded` are `True`. With a verdict, `result.tier3.note` says how many chunks failed; it also gives the reason for an `on_oversize` block when the provider allowed. When every chunk fails there's no verdict, and `result.tier3.skip_reason` gives the first failure.
 
-**Choosing the operating point (`block_threshold`).** By default the model's `decision` word decides. That word is an implicit 0.5 cut that moves whenever the model is retrained. Set `tier3.block_threshold` to decide on `verdict.score` (P(block)) instead. Raise it for fewer false positives, lower it for more recall; `0.5` reproduces the word. The provider must report `score` as a real P(block), not "confidence in whichever decision I made". If `score` is missing or outside `[0, 1]`, defender uses `decision` and warns once.
+**Choosing the operating point (`block_threshold`).** By default, Defender uses the provider's `decision` label. The label alone does not define a calibrated probability threshold. Set `tier3.block_threshold` to decide on `verdict.score` (P(block)) instead. Raise the threshold to require a higher score to block, or lower it to block at a lower score. Evaluate the trade-off on representative tool results. The provider must report `score` as a real P(block), not "confidence in whichever decision I made". If `score` is missing or outside `[0, 1]`, defender uses `decision` and warns once.
 
 **Policy options** (all in `tier3={...}`; camelCase keys work too):
 
@@ -285,19 +291,19 @@ A failed chunk is skipped (fail open), and `result.tier3.errored` and `coverage_
 
 **Cancellation.** Cancelling the task that awaits `defend_tool_result_async` cancels in-flight provider calls and raises `CancelledError`.
 
-**Fail-open by default.** Without `on_error="block"`, a provider error or timeout records a `skip_reason`; in cascade defender falls back to the Tier 2 decision, in `tier3_only` it allows. `enable_tier3=True` with no provider (and no `on_error="block"`) falls back to Tier 1 + Tier 2 and logs one warning per instance, so Tier 3 misconfiguration never silently disables defense.
+**Error defaults.** A provider error or timeout records a `skip_reason`. The default `on_error="tier2"` in cascade preserves the Tier 2 decision; the default `on_error="allow"` in `tier3_only` skips failed chunks, while successful chunks can still block. `enable_tier3=True` with no provider falls back to Tier 1 + Tier 2 and logs one warning per instance, unless `on_error="block"` is configured. See the policy table above for overrides.
 
 ### `allowed` vs `risk_level`
 
-- **`DefenseResult.sanitized`** is a **sentence-level cleaned** copy of the tool result (high-scoring sentences dropped within high-risk fields, optionally `[UD-…]` boundary-wrapped). Cleaning is best-effort (capped by detection): still gate on `allowed`. Set `sanitize_content=False` for pure detect-and-gate: `sanitized` is then the input verbatim.
-- Use **`allowed`** for gating when `block_high_risk=True`: `False` means do not pass `sanitized` to the model as-is.
+- **`DefenseResult.sanitized`** is a **sentence-level cleaned** copy of the tool result (high-scoring sentences dropped within high-risk fields, optionally `[UD-…]` boundary-wrapped). Cleaning is best-effort (capped by detection): still gate on `allowed`. Set `sanitize_content=False` to disable sentence cleaning; `annotate_boundary` controls wrapping separately.
+- Use **`allowed`** for gating when `block_high_risk=True`: `False` means withhold the tool output. With `block_high_risk=False` (the default), `allowed` is always `True`, even when detections are present. It is not a guarantee of safety.
 - **`risk_level`** is diagnostic: it starts at `default_risk_level` (default `"low"`) and is **escalated** by Tier 1 / Tier 2 signals. When Tier 3 runs, its verdict can lower it (a cascade `allow` override) or set it (`tier3_only`). Use it for logging, not as the sole block signal unless you implement your own policy.
 
 | Level | Typical trigger |
 |-------|------------------|
 | `low` | No strong signals |
-| `medium` | Lighter pattern / sanitization signals |
-| `high` / `critical` | Strong injection patterns, encoding signals, or high Tier 2 score |
+| `medium` | Lighter pattern signals |
+| `high` / `critical` | Strong injection patterns, decoded attack patterns, or high Tier 2 score |
 
 ## API
 
@@ -311,7 +317,7 @@ defense = create_prompt_defense(
     block_high_risk=False,
     default_risk_level="low",
     annotate_boundary=False,  # True: wrap risky strings with [UD-…] tags (npm: annotateBoundary)
-    sanitize_content=True,  # False: detect-and-gate; sanitized is the input verbatim
+    sanitize_content=True,  # False: disable sentence cleaning; boundary annotation is separate
     tier2_fields=["subject", "body", "snippet"],  # optional: scope Tier 2 to these JSON keys (default: all strings)
     tier2_config={"high_risk_threshold": 0.52},  # optional; defaults come from the bundled model's classifier_config.json
     use_sfe=False,  # True, or {"threshold": 0.5, "predictor": ...}: SFE preprocessing before Tier 2
@@ -333,8 +339,8 @@ from dataclasses import dataclass, field
 @dataclass
 class DefenseResult:
     allowed: bool                             # gating decision (respects block_high_risk)
-    risk_level: RiskLevel                     # diagnostic; max of Tier 1 / Tier 2
-    sanitized: Any                            # sentence-cleaned copy (input verbatim when sanitize_content=False); dropped runs leave a [CONTENT SANITISED] marker; best-effort, still gate on allowed
+    risk_level: RiskLevel                     # diagnostic; combines Tier 1 / Tier 2 and optional Tier 3 policy
+    sanitized: Any                            # sentence-cleaned copy (cleaning disabled when sanitize_content=False); dropped runs leave a [CONTENT SANITISED] marker; best-effort, still gate on allowed
     detections: list[str]                     # Tier 1 pattern names detected
     fields_sanitized: list[str]               # fields whose content the cleaner changed in sanitized (empty when sanitize_content=False or no Tier 2); for detections read detections/patterns_by_field
     patterns_by_field: dict[str, list[str]]   # patterns detected per field
@@ -344,8 +350,8 @@ class DefenseResult:
     tier2_aux_score: float | None = None      # set only when tier2_config["multihead"] is set
     tier2_multihead_blocked: bool | None = None
     tier2_skip_reason: str | None = None
-    max_sentence: str | None = None
-    tier3: Tier3Result | None = None          # present when Tier 3 ran
+    max_sentence: str | None = None           # selected Tier 2 chunk; may contain multiple sentences
+    tier3: Tier3Result | None = None          # verdict or skip metadata when Tier 3 was requested
     fields_dropped: list[str] = field(default_factory=list)
     truncated_at_depth: bool | None = None
     latency_ms: float = 0.0
@@ -399,10 +405,12 @@ defense.warmup_tier2()  # no-op if enable_tier2=False; warns (or raises with req
 
 ## Integration example
 
+Call this wrapper from your agent loop after your tool returns. Supply your Gmail client and message ID in the last line.
+
 ```python
 from stackone_defender import create_prompt_defense
 
-defense = create_prompt_defense(block_high_risk=True)
+defense = create_prompt_defense(block_high_risk=True, require_tier2=True)
 defense.warmup_tier2()
 
 def run_tool_and_defend(raw_result: dict, tool_name: str):
@@ -461,7 +469,7 @@ Traps when porting from TypeScript (the fixtures pin TS behavior):
 
 ## Defender by StackOne
 
-Defender is built and maintained by [StackOne](https://www.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=about), which connects AI agents to business applications. We run Defender in production to protect agent tool calls against indirect prompt injection.
+Defender is built and maintained by [StackOne](https://www.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=about), which connects AI agents to business applications. The local detection layers work without a StackOne account.
 
 - **Defender site**: [defender.stackone.com](https://defender.stackone.com?utm_source=pypi&utm_medium=readme&utm_campaign=about)
 - **Benchmarks**: [defender.stackone.com/defense-benchmark](https://defender.stackone.com/defense-benchmark)
