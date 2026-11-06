@@ -18,7 +18,7 @@ defense = create_prompt_defense(
     use_sfe=False,  # True, or {"threshold": 0.5, "predictor": ...}: SFE preprocessing before Tier 2
     enable_tier3=False,
     defender_mode="cascade",  # or "tier3_only"; ignored unless enable_tier3
-    tier3=None,  # dict of Tier 3 options (see Tier 3 above)
+    tier3=None,  # dict of Tier 3 options (see the optional LLM review reference)
 )
 ```
 
@@ -46,7 +46,9 @@ class DefenseResult:
     tier2_multihead_blocked: bool | None = None
     tier2_skip_reason: str | None = None
     max_sentence: str | None = None           # selected Tier 2 chunk; may contain multiple sentences
-    tier3: Tier3Result | None = None          # verdict or skip metadata when Tier 3 was requested
+    # Metadata from the Tier 3 path or an eligible cascade escalation.
+    # With no provider and non-blocking on_error, tier3_only falls back to T1 + T2 and leaves this None.
+    tier3: Tier3Result | None = None          # verdict or skip metadata when present
     fields_dropped: list[str] = field(default_factory=list)
     truncated_at_depth: bool | None = None
     latency_ms: float = 0.0
@@ -65,15 +67,21 @@ class DefenseResult:
 
 Sync batch API. Each item is `{"value": ..., "tool_name": ..., "context": {...}}` (`context` optional). Without Tier 3 it runs items one by one. With `enable_tier3=True` it runs them concurrently in one `asyncio.run()` (sync providers still run one at a time) and raises `RuntimeError` inside a running event loop. From async code, use `defend_tool_results_async`.
 
+Set `block_high_risk=True` to enable blocking. Both batch APIs return verdicts; your application must check each one before forwarding its `sanitized` value.
+
 ```python
 results = defense.defend_tool_results([
     {"value": email_data, "tool_name": "gmail_get_message"},
     {"value": doc_data, "tool_name": "documents_get"},
     {"value": pr_data, "tool_name": "github_get_pull_request"},
 ])
-for r in results:
-    if not r.allowed:
-        print("Blocked:", ", ".join(r.detections))
+for result in results:
+    if not result.allowed:
+        print("Blocked:", ", ".join(result.detections))
+        continue
+
+    # Forward this value to your agent in place of the original tool output.
+    print(result.sanitized)
 ```
 
 ### `await defense.defend_tool_results_async(items)`
@@ -85,6 +93,14 @@ results = await defense.defend_tool_results_async([
     {"value": email_data, "tool_name": "gmail_get_message"},
     {"value": doc_data, "tool_name": "documents_get"},
 ])
+
+for result in results:
+    if not result.allowed:
+        print("Blocked:", ", ".join(result.detections))
+        continue
+
+    # Forward this value to your agent in place of the original tool output.
+    print(result.sanitized)
 ```
 
 ### `defense.analyze(text)`

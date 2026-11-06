@@ -215,7 +215,17 @@ results = defense.defend_tool_results([
     {"value": email_data, "tool_name": "gmail_get_message"},
     {"value": doc_data, "tool_name": "documents_get"},
 ])
+
+for result in results:
+    if not result.allowed:
+        print("Blocked tool output:", result.risk_level)
+        continue
+
+    # Forward this value to your agent in place of the original tool output.
+    print(result.sanitized)
 ```
+
+Batch methods return verdicts; your application must withhold blocked outputs and forward only allowed `sanitized` values. Set `block_high_risk=True` to enable blocking.
 
 Use `await defense.defend_tool_result_async(...)` or `await defense.defend_tool_results_async(...)` from async application code. `defense.analyze(text)` runs Tier 1 analysis only. See the [complete API reference](./docs/api-reference.md) for advanced options and result fields.
 
