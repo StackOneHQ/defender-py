@@ -22,6 +22,7 @@ from ..classifiers.tier3_orchestrator import get_default_tier3_provider
 from ..config import MAX_TRAVERSAL_DEPTH, create_config
 from ..sfe.preprocess import SfePredictor, get_default_predictor, sfe_preprocess
 from ..types import (
+    DataBoundary,
     DefenderMode,
     DefenseResult,
     MultiheadConfig,
@@ -109,6 +110,8 @@ class _Tier2Outcome:
     high_risk_values: set[str] = field(default_factory=set)
     # True when SFE kept nothing scorable and the original value was scored instead.
     sfe_fallback: bool = False
+    # True when string extraction threw: the payload couldn't be scanned. Strict mode blocks it.
+    payload_error: bool = False
 
 
 # One printable-ASCII token with no whitespace: a URL, ID or token, not prose.
@@ -123,6 +126,9 @@ def _is_machine_token(t: str) -> bool:
     if not _ASCII_TOKEN_RE.fullmatch(t):
         return False
     return sum(1 for w in re.split(r"[-_+]+", t) if _WORD_RE.fullmatch(w)) < 4
+
+# Containers Tier 2 walks like lists (Mappings are walked like dicts).
+_SEQUENCES = (list, tuple, set, frozenset)
 
 
 def _extract_strings(
@@ -146,10 +152,10 @@ def _extract_strings(
             return
         if isinstance(value, str):
             strings.append(value)
-        elif isinstance(value, list):
+        elif isinstance(value, _SEQUENCES):
             for item in value:
                 collect_all(item, depth + 1)
-        elif isinstance(value, dict):
+        elif isinstance(value, Mapping):
             for v in value.values():
                 collect_all(v, depth + 1)
 
@@ -168,10 +174,10 @@ def _extract_strings(
             if depth_flag is not None:
                 depth_flag["hit"] = True
             return
-        if isinstance(value, list):
+        if isinstance(value, _SEQUENCES):
             for item in value:
                 traverse(item, depth + 1)
-        elif isinstance(value, dict):
+        elif isinstance(value, Mapping):
             for k, v in value.items():
                 if k in field_set:
                     collect_all(v, depth + 1)
@@ -753,12 +759,13 @@ class PromptDefense:
         # Chunks aborted by stop_on_first_block went unreviewed; that only matters if the call is allowed.
         if not blocked and aborted_chunks > 0:
             depth_flag["coverage_degraded"] = True
-        risk_level: RiskLevel = "high" if blocked or payload_error else "low"
-        # block_high_risk=False always allows; strict mode fails closed on a payload error.
+        # An unreadable payload (payload_error) wasn't reviewed, so only what Tier 1 detected counts;
+        # strict mode still blocks it through ``allowed``.
+        risk_level: RiskLevel = "high" if blocked else tier1_risk if payload_error and detections else "low"
         allowed = not self._config.block_high_risk or (not blocked and not payload_error)
 
         meta: dict[str, Any] = {}
-        if chunk_failures > 0:
+        if chunk_failures > 0 or payload_error:
             meta["errored"] = True
         if decided_by is not None:
             meta["decided_by"] = decided_by
@@ -889,7 +896,10 @@ class PromptDefense:
         boundary = generate_data_boundary() if self._annotate_boundary else None
 
         t_tier1_start = time.perf_counter()
-        sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name, boundary=boundary)
+        try:
+            sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name, boundary=boundary)
+        except Exception as e:
+            return self._build_unanalyzable_result(value, f"Tier 1 sanitize error: {describe_error(e)}", start_time)
         detections, tier1_flagged, prm = self._tier1_metadata(sanitized)
         tier1_ms = (time.perf_counter() - t_tier1_start) * 1000
 
@@ -933,26 +943,14 @@ class PromptDefense:
             block_high_risk=self._config.block_high_risk,
             tier3_override_block=tier3_override_block,
         )
+        # A payload Tier 2 couldn't read fails closed in strict mode.
+        if tier2.payload_error and self._config.block_high_risk:
+            allowed = False
 
         # sanitized is a sentence-cleaned copy of the detect-only payload's high-risk
         # fields (unless sanitize_content is off). fields_sanitized reports the fields
         # the cleaner actually changed.
-        original = sanitized.sanitized
-        if (
-            self._sanitize_content
-            and self._tier2 is not None
-            and risk_level in ("high", "critical")
-            and tier2.high_risk_values
-        ):
-            cleaned, cleaned_fields = clean_high_risk_content(
-                original,
-                tier2.high_risk_values,
-                self._tier2,
-                self._config.tier2.high_risk_threshold,
-                boundary,
-            )
-        else:
-            cleaned, cleaned_fields = original, []
+        cleaned, cleaned_fields, clean_failed = self._clean_content(sanitized.sanitized, tier2, risk_level, boundary)
 
         return DefenseResult(
             allowed=allowed,
@@ -978,7 +976,10 @@ class PromptDefense:
             tier1_ms=tier1_ms,
             cold_load=tier2.cold_load,
             tier2_available=tier2.tier2_available,
-            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag),
+            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag)
+            or tier2.payload_error
+            or clean_failed
+            or None,
         )
 
     def _defend_tool_result_sync(
@@ -1016,7 +1017,10 @@ class PromptDefense:
 
         # Tier 1: pattern-based sanitization on the original payload (matches TS 0.6.3).
         t_tier1_start = time.perf_counter()
-        sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name, boundary=boundary)
+        try:
+            sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name, boundary=boundary)
+        except Exception as e:
+            return self._build_unanalyzable_result(value, f"Tier 1 sanitize error: {describe_error(e)}", start_time)
 
         # Collect Tier 1 metadata
         prm = sanitized.metadata.patterns_removed_by_field
@@ -1076,25 +1080,13 @@ class PromptDefense:
             block_high_risk=self._config.block_high_risk,
             tier3_override_block=None,
         )
+        # A payload Tier 2 couldn't read fails closed in strict mode.
+        if tier2.payload_error and self._config.block_high_risk:
+            allowed = False
 
         # sanitized is the sentence-cleaned copy of the detect-only payload.
         # fields_sanitized reports the fields the cleaner actually changed.
-        original = sanitized.sanitized
-        if (
-            self._sanitize_content
-            and self._tier2 is not None
-            and risk_level in ("high", "critical")
-            and tier2.high_risk_values
-        ):
-            cleaned, cleaned_fields = clean_high_risk_content(
-                original,
-                tier2.high_risk_values,
-                self._tier2,
-                self._config.tier2.high_risk_threshold,
-                boundary,
-            )
-        else:
-            cleaned, cleaned_fields = original, []
+        cleaned, cleaned_fields, clean_failed = self._clean_content(sanitized.sanitized, tier2, risk_level, boundary)
 
         return DefenseResult(
             allowed=allowed,
@@ -1119,16 +1111,61 @@ class PromptDefense:
             tier1_ms=tier1_ms,
             cold_load=tier2.cold_load,
             tier2_available=tier2.tier2_available,
-            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag),
+            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag)
+            or tier2.payload_error
+            or clean_failed
+            or None,
         )
 
     # ------------------------------------------------------------------
     # Tier 2 helpers
     # ------------------------------------------------------------------
+
+    def _clean_content(
+        self, original: Any, tier2: _Tier2Outcome, risk_level: RiskLevel, boundary: DataBoundary | None
+    ) -> tuple[Any, list[str], bool]:
+        if not (
+            self._sanitize_content
+            and self._tier2 is not None
+            and risk_level in ("high", "critical")
+            and tier2.high_risk_values
+        ):
+            return original, [], False
+        try:
+            cleaned, fields = clean_high_risk_content(
+                original, tier2.high_risk_values, self._tier2, self._config.tier2.high_risk_threshold, boundary
+            )
+        except Exception:
+            # The cleaner walks the payload again. If that throws, keep the original
+            # (the block decision already stands) and flag degraded coverage.
+            return original, [], True
+        return cleaned, fields, False
     #
     # ``defend_tool_result`` orchestrates Tier 1 + Tier 2. The Tier 2 path
     # is split into five focused steps below to keep that orchestration
     # readable and to let each branch be unit-tested in isolation.
+
+    def _build_unanalyzable_result(self, value: Any, reason: str, start_time: float) -> DefenseResult:
+        """Result for a payload Tier 1 can't traverse. Nothing was scanned, so no risk level is
+        raised; strict mode still blocks it. Never let the exception escape."""
+        return DefenseResult(
+            allowed=not self._config.block_high_risk,
+            risk_level="low",
+            sanitized=value,
+            detections=[],
+            fields_sanitized=[],
+            patterns_by_field={},
+            detected_field_count=0,
+            tier2_skip_reason=redact_error_text(reason),
+            coverage_degraded=True,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+        )
+
+    @staticmethod
+    def _tier2_extraction_error(out: _Tier2Outcome, e: Exception) -> _Tier2Outcome:
+        out.payload_error = True
+        out.skip_reason = f"Tier 2 extraction error: {redact_error_text(describe_error(e))}"
+        return out
 
     def _evaluate_tier2(
         self,
@@ -1164,11 +1201,14 @@ class PromptDefense:
             if self._tier2_fields is not None
             else self._config.tier2.tier2_fields
         )
-        strings = [
-            s
-            for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
-            if len(s) > 0
-        ]
+        try:
+            strings = [
+                s
+                for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
+                if len(s) > 0
+            ]
+        except Exception as e:
+            return self._tier2_extraction_error(out, e)
         # Phase 1: prepare chunks (warmup + tokenize + pack).
         t_prep_start = time.perf_counter()
         all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
@@ -1177,11 +1217,14 @@ class PromptDefense:
         # Decided on prepared chunks, so the classifier's own normalisation and length rules apply.
         # Skip machine tokens (URLs, IDs): SFE is right to drop them and Tier 2 scores some high.
         if sfe_dropped and all(r[0] < 0 or not js_trim(s) for s, r in zip(strings, string_ranges, strict=True)):
-            fallback = [
-                s
-                for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
-                if (t := js_trim(s)) and not _is_machine_token(t)
-            ]
+            try:
+                fallback = [
+                    s
+                    for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
+                    if (t := js_trim(s)) and not _is_machine_token(t)
+                ]
+            except Exception as e:
+                return self._tier2_extraction_error(out, e)
             fallback_built = self._tier2_build_chunks(tier2, fallback)
             if fallback_built[0]:
                 strings = fallback
