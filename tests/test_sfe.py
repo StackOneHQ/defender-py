@@ -244,6 +244,11 @@ class TestSfeFallback:
         assert result.sfe_fallback is None
         assert result.allowed is True
 
+    def test_no_fallback_for_whitespace_only_strings(self):
+        defense = create_prompt_defense(enable_tier1=False, use_sfe={"predictor": _DropAll()})
+        result = defense.defend_tool_result({"notes": " " * 20}, "test_tool")
+        assert result.sfe_fallback is None
+
     def test_no_fallback_without_text(self):
         defense = create_prompt_defense(enable_tier1=False, use_sfe={"predictor": _DropAll()})
         result = defense.defend_tool_result({"count": 3, "ok": True}, "test_tool")

@@ -1166,7 +1166,7 @@ class PromptDefense:
             fallback = [
                 s
                 for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
-                if utf16_len(s) >= min_len and not _ASCII_TOKEN_RE.fullmatch(js_trim(s))
+                if utf16_len(t := js_trim(s)) >= min_len and not _ASCII_TOKEN_RE.fullmatch(t)
             ]
             if fallback:
                 strings = fallback
