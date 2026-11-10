@@ -98,35 +98,61 @@ def detect_encoding(
     return result
 
 
+def _b64decode_url_safe(candidate: str) -> str | None:
+    """Decode standard or URL-safe base64; None when it isn't valid base64."""
+    try:
+        # Pad to a multiple of 4; b64decode rejects unpadded input (JS atob tolerates it).
+        unpadded = candidate.replace("-", "+").replace("_", "/").rstrip("=")
+        decoded_bytes = base64.b64decode(unpadded + "=" * (-len(unpadded) % 4), validate=False)
+    except Exception:
+        return None
+    try:
+        return decoded_bytes.decode("ascii")
+    except UnicodeDecodeError:
+        return decoded_bytes.decode("latin-1", errors="replace")
+
+
+def _is_printable_text(s: str | None) -> bool:
+    return s is not None and all(0x20 <= ord(c) <= 0x7E or c in "\t\n\r" for c in s)
+
+
+# Retries per candidate when a word joined by - or _ makes the whole run undecodable.
+_MAX_BASE64_RETRIES = 16
+
+
 def _detect_base64(text: str, min_length: int) -> list[EncodingDetection]:
     detections: list[EncodingDetection] = []
-    for m in re.finditer(r"[A-Za-z0-9+/]{20,}={0,2}", text):
+    # Standard or URL-safe (-_) alphabet.
+    for m in re.finditer(r"[A-Za-z0-9+/\-_]{20,}={0,2}", text):
         candidate = m.group(0)
         if len(candidate) < min_length:
             continue
-        try:
-            # Pad to a multiple of 4; b64decode rejects unpadded input, which
-            # the except below would silently drop (JS atob tolerates it).
-            padded = candidate + "=" * (-len(candidate) % 4)
-            decoded_bytes = base64.b64decode(padded, validate=False)
-            try:
-                decoded = decoded_bytes.decode("ascii")
-            except UnicodeDecodeError:
-                decoded = decoded_bytes.decode("latin-1", errors="replace")
-            is_printable = all(0x20 <= ord(c) <= 0x7e or c in "\t\n\r" for c in decoded)
-            is_suspicious = is_printable and bool(_SUSPICIOUS_RE.search(decoded))
-            detections.append(
-                EncodingDetection(
-                    type="base64",
-                    original=candidate,
-                    decoded=decoded if is_printable else None,
-                    position=m.start(),
-                    length=len(candidate),
-                    suspicious=is_suspicious,
-                )
+        # "payload_<base64>": retry from each - or _ so a joined word can't hide the payload.
+        offset = 0
+        raw = _b64decode_url_safe(candidate)
+        if not _is_printable_text(raw):
+            cuts = [c.start() for c in re.finditer(r"[-_]", candidate)][:_MAX_BASE64_RETRIES]
+            for cut in cuts:
+                rest = candidate[cut + 1 :]
+                if len(rest) < min_length:
+                    break
+                d = _b64decode_url_safe(rest)
+                if _is_printable_text(d):
+                    offset, candidate, raw = cut + 1, rest, d
+                    break
+        if raw is None:
+            continue  # not valid base64
+        decoded = raw if _is_printable_text(raw) else None
+        detections.append(
+            EncodingDetection(
+                type="base64",
+                original=candidate,
+                decoded=decoded,
+                position=m.start() + offset,
+                length=len(candidate),
+                suspicious=decoded is not None and bool(_SUSPICIOUS_RE.search(decoded)),
             )
-        except Exception:
-            pass
+        )
     return detections
 
 

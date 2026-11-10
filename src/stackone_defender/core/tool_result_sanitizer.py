@@ -333,7 +333,7 @@ class ToolResultSanitizer:
 
             result = self._pattern_detector.analyze(analysis_value)
             if result.has_detections:
-                tier1_patterns = [m.pattern for m in result.matches]
+                tier1_patterns = list(dict.fromkeys(m.pattern for m in result.matches))
                 risk_level = _risk_ladder(risk_level, result.suggested_risk)
                 if context.cumulative_risk and result.matches:
                     self._update_cumulative_risk(context.cumulative_risk, result.suggested_risk, tier1_patterns)

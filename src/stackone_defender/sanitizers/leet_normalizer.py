@@ -41,6 +41,7 @@ PROTECTED_SEQUENCE = re.compile(
 
 _TOKEN_RE = re.compile(r"[@a-zA-Z0-9!$]+")
 _HAS_LETTER_RE = re.compile(r"[a-zA-Z]")
+_NON_LEET_DIGIT_RE = re.compile(r"[269]")
 _ALNUM_RE = re.compile(r"[a-zA-Z0-9]")
 
 
@@ -68,7 +69,41 @@ def _apply_leet_map_chars(token: str) -> str:
     return "".join(out)
 
 
-def _apply_leet_map_token_aware(text: str) -> str:
+# Short words attacks spell in leet with one letter left ("4n 4dm1n", "4r3", "7h3").
+# Other tokens with under 2 letters ("v1", "Q3") are IDs.
+_SHORT_WORDS = frozenset(
+    (  # noqa: SIM905
+        "am an as at be by do go if in is it me my no of on or so to up us we act all and any are can for get "
+        "has how its may new not now off our out own run set the use was who why you"
+    ).split()
+)
+_HEX_RE = re.compile(r"[0-9a-fA-F]+")
+_EDGE_RE = re.compile(r"^([0-9]+)(.*)$|^(.*?)([0-9]+)$", re.S)
+_LEET_CHAR_RE = re.compile(r"[0134578@!$]")
+
+
+def _is_identifier_like(token: str) -> bool:
+    """IDs, hashes and versions (``"user123"``, ``"d14f0615"``, ``"v2"``).
+
+    Under 2 letters (unless a short word), hex with a digit, or at either end
+    4+ digits, or 2-3 with a 2, 6 or 9 when the rest has no leet (``"COVID19"``,
+    ``"user123"``, not ``"rul35"``, ``"573al"`` or ``"22ign0re"``). Leet in them
+    would only produce noise.
+    """
+    if len(_HAS_LETTER_RE.findall(token)) < 2:
+        return _NON_LEET_DIGIT_RE.sub("", _apply_leet_map_chars(token)).lower() not in _SHORT_WORDS
+    if len(token) >= 6 and _HEX_RE.fullmatch(token) and any(c.isdigit() for c in token):
+        return True
+    # A short digit run marks an ID only when the rest has no leet ("user123", not "22ign0re").
+    edge = _EDGE_RE.match(token)
+    if not edge:
+        return False
+    run = edge.group(1) if edge.group(1) is not None else edge.group(4)
+    rest = edge.group(2) if edge.group(1) is not None else edge.group(3)
+    return len(run) >= 4 or (len(run) >= 2 and bool(_NON_LEET_DIGIT_RE.search(run)) and not _LEET_CHAR_RE.search(rest))
+
+
+def _apply_leet_map_token_aware(text: str, protect_ids: bool) -> str:
     """Token-aware leet substitution.
 
     Splits text into alphanumeric tokens (``[@a-zA-Z0-9!$]+``) and
@@ -82,14 +117,16 @@ def _apply_leet_map_token_aware(text: str) -> str:
 
     def _repl(match: re.Match[str]) -> str:
         token = match.group(0)
-        if not _HAS_LETTER_RE.search(token):
+        if not _HAS_LETTER_RE.search(token) or (protect_ids and _is_identifier_like(token)):
             return token
-        return _apply_leet_map_chars(token)
+        mapped = _apply_leet_map_chars(token)
+        # Digits left in a leet word are padding ("d1sreg4rd2").
+        return token if mapped == token else _NON_LEET_DIGIT_RE.sub("", mapped)
 
     return _TOKEN_RE.sub(_repl, text)
 
 
-def normalize_leet_speak(text: str) -> str:
+def normalize_leet_speak(text: str, protect_ids: bool = True) -> str:
     """Normalize leet-speak substitutions in text.
 
     Converts digit and symbol substitutions back to their alphabetic
@@ -108,8 +145,8 @@ def normalize_leet_speak(text: str) -> str:
     segments: list[str] = []
     last_index = 0
     for match in PROTECTED_SEQUENCE.finditer(text):
-        segments.append(_apply_leet_map_token_aware(text[last_index : match.start()]))
+        segments.append(_apply_leet_map_token_aware(text[last_index : match.start()], protect_ids))
         segments.append(match.group(0))
         last_index = match.end()
-    segments.append(_apply_leet_map_token_aware(text[last_index:]))
+    segments.append(_apply_leet_map_token_aware(text[last_index:], protect_ids))
     return "".join(segments)
