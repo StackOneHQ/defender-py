@@ -244,6 +244,13 @@ class TestSfeFallback:
         assert result.sfe_fallback is None
         assert result.allowed is True
 
+    def test_falls_back_when_kept_text_is_short_in_code_points(self):
+        # 5 emoji are 10 UTF-16 units but 5 code points, which the classifier skips as too short.
+        defense = create_prompt_defense(enable_tier1=False, block_high_risk=True, use_sfe={"predictor": _DropNotes()})
+        result = defense.defend_tool_result({"status": "\U0001f600" * 5, "notes": _INJECTION}, "test_tool")
+        assert result.sfe_fallback is True
+        assert result.allowed is False
+
     def test_no_fallback_for_whitespace_only_strings(self):
         defense = create_prompt_defense(enable_tier1=False, use_sfe={"predictor": _DropAll()})
         result = defense.defend_tool_result({"notes": " " * 20}, "test_tool")

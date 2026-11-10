@@ -45,7 +45,7 @@ from ..types import (
 )
 from ..utils.boundary import generate_data_boundary
 from ..utils.redact import describe_error, redact_error_text
-from ..utils.text import js_trim, truncate, utf16_len
+from ..utils.text import js_trim, truncate
 from .sentence_cleaner import clean_high_risk_content
 from .tier3_input import DEFAULT_MAX_CHUNKS, chunk_tier3_input, content_budget, format_records_for_tier3
 from .tier3_policy import MISSING_PROVIDER, Tier3Policy
@@ -1162,11 +1162,13 @@ class PromptDefense:
         # SFE kept nothing Tier 2 would score: score the original rather than pass it unscanned.
         # Skip ASCII tokens (URLs, IDs): SFE is right to drop them and Tier 2 scores some high.
         min_len = int(tier2.get_config().get("min_text_length", 0)) if sfe_dropped else 0
-        if sfe_dropped and not any(utf16_len(s) >= min_len for s in strings):
+        # Lengths count like the classifier's min_text_length check (code points), so a kept
+        # string it would skip can't block the fallback.
+        if sfe_dropped and not any(len(s) >= min_len for s in strings):
             fallback = [
                 s
                 for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
-                if utf16_len(t := js_trim(s)) >= min_len and not _ASCII_TOKEN_RE.fullmatch(t)
+                if len(t := js_trim(s)) >= min_len and not _ASCII_TOKEN_RE.fullmatch(t)
             ]
             if fallback:
                 strings = fallback
