@@ -281,12 +281,43 @@ def _policy(inp: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+class _ScriptedSfe:
+    """Drops a field when the first path token of its SFE text is in drop_keys ("*" drops all)."""
+
+    def __init__(self, drop_keys: list[str]):
+        self.drop = set(drop_keys)
+
+    def predict(self, text: str) -> dict[str, Any]:
+        key = text.split(" ")[2]
+        return {"label": "drop" if "*" in self.drop or key in self.drop else "pass", "prob": 0.99}
+
+    def predict_batch(self, texts: list[str]) -> list[dict[str, Any]]:
+        return [self.predict(t) for t in texts]
+
+
+def _sfe_fallback(inp: dict[str, Any]) -> dict[str, Any]:
+    defense = create_prompt_defense(
+        enable_tier1=False,
+        block_high_risk=True,
+        tier2_config={"high_risk_threshold": 0},
+        use_sfe={"predictor": _ScriptedSfe(inp["dropKeys"])},
+    )
+    r = _run(defense.defend_tool_result_async(inp["payload"], inp.get("toolName", "test_tool")))
+    return {
+        "allowed": r.allowed,
+        "fieldsDropped": r.fields_dropped,
+        "sfeFallback": r.sfe_fallback is True,
+        "tier2SkipReason": r.tier2_skip_reason,
+    }
+
+
 ADAPTERS = {
     "tier3-serialize": _serialize,
     "tier3-prompt": _prompt,
     "tier3-parse": _parse,
     "tier3-redact": _redact,
     "tier3-policy": _policy,
+    "sfe-fallback": _sfe_fallback,
 }
 
 

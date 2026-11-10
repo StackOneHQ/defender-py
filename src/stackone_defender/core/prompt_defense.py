@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -44,7 +45,7 @@ from ..types import (
 )
 from ..utils.boundary import generate_data_boundary
 from ..utils.redact import describe_error, redact_error_text
-from ..utils.text import truncate
+from ..utils.text import js_trim, truncate
 from .sentence_cleaner import clean_high_risk_content
 from .tier3_input import DEFAULT_MAX_CHUNKS, chunk_tier3_input, content_budget, format_records_for_tier3
 from .tier3_policy import MISSING_PROVIDER, Tier3Policy
@@ -106,6 +107,12 @@ class _Tier2Outcome:
     tier2_available: bool | None = None
     # Leaf string values that scored high — the fields the cleaner rewrites.
     high_risk_values: set[str] = field(default_factory=set)
+    # True when SFE kept nothing scorable and the original value was scored instead.
+    sfe_fallback: bool = False
+
+
+# One printable-ASCII token with no whitespace: a URL, ID or token, not prose.
+_ASCII_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
 
 
 def _extract_strings(
@@ -877,7 +884,7 @@ class PromptDefense:
         tier1_ms = (time.perf_counter() - t_tier1_start) * 1000
 
         tier2 = (
-            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag)
+            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag, value, bool(fields_dropped))
             if self._tier2 is not None
             else _Tier2Outcome()
         )
@@ -953,6 +960,7 @@ class PromptDefense:
             max_sentence=tier2.max_sentence,
             tier3=tier3_result,
             fields_dropped=fields_dropped,
+            sfe_fallback=tier2.sfe_fallback or None,
             truncated_at_depth=depth_flag["hit"] or None,
             latency_ms=(time.perf_counter() - start_time) * 1000,
             phase_timings=tier2.phase_timings,
@@ -1022,7 +1030,7 @@ class PromptDefense:
         # need to ``assert self._tier2 is not None`` -- those asserts
         # would be stripped under PYTHONOPTIMIZE.
         tier2 = (
-            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag)
+            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag, value, bool(fields_dropped))
             if self._tier2 is not None
             else _Tier2Outcome()
         )
@@ -1093,6 +1101,7 @@ class PromptDefense:
             tier2_skip_reason=tier2.skip_reason,
             max_sentence=tier2.max_sentence,
             fields_dropped=fields_dropped,
+            sfe_fallback=tier2.sfe_fallback or None,
             truncated_at_depth=depth_flag["hit"] or None,
             latency_ms=(time.perf_counter() - start_time) * 1000,
             phase_timings=tier2.phase_timings,
@@ -1116,6 +1125,8 @@ class PromptDefense:
         tier2: Tier2Classifier,
         sfe_filtered_value: Any,
         depth_flag: dict[str, bool],
+        original_value: Any,
+        sfe_dropped: bool,
     ) -> _Tier2Outcome:
         """Run the Tier 2 pipeline end to end for one tool result.
 
@@ -1148,6 +1159,25 @@ class PromptDefense:
             for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
             if len(s) > 0
         ]
+        # Phase 1: prepare chunks (warmup + tokenize + pack).
+        t_prep_start = time.perf_counter()
+        all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
+
+        # SFE kept nothing Tier 2 would score: score the original rather than pass it unscanned.
+        # Decided on prepared chunks, so the classifier's own normalisation and length rules apply.
+        # Skip ASCII tokens (URLs, IDs): SFE is right to drop them and Tier 2 scores some high.
+        if sfe_dropped and all(r[0] < 0 or not js_trim(s) for s, r in zip(strings, string_ranges, strict=True)):
+            fallback = [
+                s
+                for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
+                if (t := js_trim(s)) and not _ASCII_TOKEN_RE.fullmatch(t)
+            ]
+            fallback_built = self._tier2_build_chunks(tier2, fallback)
+            if fallback_built[0]:
+                strings = fallback
+                all_chunks, string_ranges, skip_reasons = fallback_built
+                out.sfe_fallback = True
+
         if not strings:
             scoped = fields_for_tier2 is not None and len(fields_for_tier2) > 0
             out.skip_reason = (
@@ -1156,10 +1186,6 @@ class PromptDefense:
                 else "No strings extracted from tool result"
             )
             return out
-
-        # Phase 1: prepare chunks (warmup + tokenize + pack).
-        t_prep_start = time.perf_counter()
-        all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
         if not all_chunks:
             out.skip_reason = (
                 "All strings skipped by classifier"
