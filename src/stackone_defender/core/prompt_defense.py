@@ -109,6 +109,8 @@ class _Tier2Outcome:
     high_risk_values: set[str] = field(default_factory=set)
     # True when SFE kept nothing scorable and the original value was scored instead.
     sfe_fallback: bool = False
+    # True when string extraction threw: the payload couldn't be scanned. Strict mode blocks it.
+    payload_error: bool = False
 
 
 # One printable-ASCII token with no whitespace: a URL, ID or token, not prose.
@@ -937,6 +939,9 @@ class PromptDefense:
             block_high_risk=self._config.block_high_risk,
             tier3_override_block=tier3_override_block,
         )
+        # A payload Tier 2 couldn't read fails closed in strict mode.
+        if tier2.payload_error and self._config.block_high_risk:
+            allowed = False
 
         # sanitized is a sentence-cleaned copy of the detect-only payload's high-risk
         # fields (unless sanitize_content is off). fields_sanitized reports the fields
@@ -982,7 +987,7 @@ class PromptDefense:
             tier1_ms=tier1_ms,
             cold_load=tier2.cold_load,
             tier2_available=tier2.tier2_available,
-            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag),
+            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag) or tier2.payload_error or None,
         )
 
     def _defend_tool_result_sync(
@@ -1083,6 +1088,9 @@ class PromptDefense:
             block_high_risk=self._config.block_high_risk,
             tier3_override_block=None,
         )
+        # A payload Tier 2 couldn't read fails closed in strict mode.
+        if tier2.payload_error and self._config.block_high_risk:
+            allowed = False
 
         # sanitized is the sentence-cleaned copy of the detect-only payload.
         # fields_sanitized reports the fields the cleaner actually changed.
@@ -1126,7 +1134,7 @@ class PromptDefense:
             tier1_ms=tier1_ms,
             cold_load=tier2.cold_load,
             tier2_available=tier2.tier2_available,
-            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag),
+            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag) or tier2.payload_error or None,
         )
 
     # ------------------------------------------------------------------
@@ -1152,6 +1160,12 @@ class PromptDefense:
             coverage_degraded=True,
             latency_ms=(time.perf_counter() - start_time) * 1000,
         )
+
+    @staticmethod
+    def _tier2_extraction_error(out: _Tier2Outcome, e: Exception) -> _Tier2Outcome:
+        out.payload_error = True
+        out.skip_reason = f"Tier 2 extraction error: {redact_error_text(describe_error(e))}"
+        return out
 
     def _evaluate_tier2(
         self,
@@ -1187,11 +1201,14 @@ class PromptDefense:
             if self._tier2_fields is not None
             else self._config.tier2.tier2_fields
         )
-        strings = [
-            s
-            for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
-            if len(s) > 0
-        ]
+        try:
+            strings = [
+                s
+                for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
+                if len(s) > 0
+            ]
+        except Exception as e:
+            return self._tier2_extraction_error(out, e)
         # Phase 1: prepare chunks (warmup + tokenize + pack).
         t_prep_start = time.perf_counter()
         all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
@@ -1200,11 +1217,14 @@ class PromptDefense:
         # Decided on prepared chunks, so the classifier's own normalisation and length rules apply.
         # Skip machine tokens (URLs, IDs): SFE is right to drop them and Tier 2 scores some high.
         if sfe_dropped and all(r[0] < 0 or not js_trim(s) for s, r in zip(strings, string_ranges, strict=True)):
-            fallback = [
-                s
-                for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
-                if (t := js_trim(s)) and not _is_machine_token(t)
-            ]
+            try:
+                fallback = [
+                    s
+                    for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
+                    if (t := js_trim(s)) and not _is_machine_token(t)
+                ]
+            except Exception as e:
+                return self._tier2_extraction_error(out, e)
             fallback_built = self._tier2_build_chunks(tier2, fallback)
             if fallback_built[0]:
                 strings = fallback

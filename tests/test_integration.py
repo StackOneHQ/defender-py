@@ -822,3 +822,35 @@ class TestUnreadablePayload:
         assert r.allowed is not strict
         assert r.risk_level == "low"
         assert r.coverage_degraded is True
+
+
+class _ValuesBoom(dict):
+    # Tier 1 walks items(); Tier 2's string extraction walks values().
+    def values(self):
+        raise RuntimeError("boom sk-secret-1234567890abcdef")
+
+
+class TestTier2UnreadablePayload:
+    """ENG-4070: a payload only Tier 2 can't read fails closed in strict mode instead of raising."""
+
+    @pytest.mark.model
+    @pytest.mark.parametrize("strict", [True, False], ids=["strict", "permissive"])
+    def test_sync_and_async(self, strict):
+        defense = create_prompt_defense(block_high_risk=strict)
+        for r in (
+            defense.defend_tool_result(_ValuesBoom(a="b"), "docs_get"),
+            asyncio.run(defense.defend_tool_result_async(_ValuesBoom(a="b"), "docs_get")),
+        ):
+            assert r.allowed is not strict
+            assert r.risk_level == "low"
+            assert r.coverage_degraded is True
+            assert r.tier2_skip_reason.startswith("Tier 2 extraction error:")
+            assert "1234567890abcdef" not in r.tier2_skip_reason
+
+    @pytest.mark.model
+    def test_batch_does_not_fail_on_one_unreadable_item(self):
+        defense = create_prompt_defense(block_high_risk=True)
+        results = defense.defend_tool_results(
+            [{"value": _ValuesBoom(a="b"), "tool_name": "docs_get"}, {"value": {"a": "hello"}, "tool_name": "docs_get"}]
+        )
+        assert [r.allowed for r in results] == [False, True]
