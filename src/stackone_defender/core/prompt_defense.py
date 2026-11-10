@@ -126,6 +126,9 @@ def _is_machine_token(t: str) -> bool:
         return False
     return sum(1 for w in re.split(r"[-_+]+", t) if _WORD_RE.fullmatch(w)) < 4
 
+# Containers Tier 2 walks like lists (Mappings are walked like dicts).
+_SEQUENCES = (list, tuple, set, frozenset)
+
 
 def _extract_strings(
     obj: Any,
@@ -148,10 +151,10 @@ def _extract_strings(
             return
         if isinstance(value, str):
             strings.append(value)
-        elif isinstance(value, list):
+        elif isinstance(value, _SEQUENCES):
             for item in value:
                 collect_all(item, depth + 1)
-        elif isinstance(value, dict):
+        elif isinstance(value, Mapping):
             for v in value.values():
                 collect_all(v, depth + 1)
 
@@ -170,10 +173,10 @@ def _extract_strings(
             if depth_flag is not None:
                 depth_flag["hit"] = True
             return
-        if isinstance(value, list):
+        if isinstance(value, _SEQUENCES):
             for item in value:
                 traverse(item, depth + 1)
-        elif isinstance(value, dict):
+        elif isinstance(value, Mapping):
             for k, v in value.items():
                 if k in field_set:
                     collect_all(v, depth + 1)

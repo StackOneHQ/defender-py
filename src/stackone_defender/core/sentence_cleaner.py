@@ -8,6 +8,7 @@ still gate on ``allowed``. Runs after Tier 2 so per-sentence scores are availabl
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from ..classifiers.tier2_classifier import Tier2Classifier, _split_into_sentences
@@ -73,9 +74,12 @@ def clean_high_risk_content(
             if cleaned != raw:
                 changed_fields.append(path)
             return wrap_with_boundary(cleaned, boundary) if boundary else cleaned
-        if isinstance(value, list):
-            return [walk(v, f"{path}[{i}]") for i, v in enumerate(value)]
-        if isinstance(value, dict):
+        if isinstance(value, (list, tuple)):
+            out = [walk(v, f"{path}[{i}]") for i, v in enumerate(value)]
+            return out if isinstance(value, list) else tuple(out)
+        if isinstance(value, (set, frozenset)):
+            return type(value)(walk(v, f"{path}[{i}]") for i, v in enumerate(value))
+        if isinstance(value, Mapping):
             return {k: walk(v, f"{path}.{k}" if path else k) for k, v in value.items()}
         return value
 
