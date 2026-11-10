@@ -34,9 +34,7 @@ def normalize_unicode(text: str) -> str:
     return normalized
 
 
-_COMBINING_MARKS_RE = re.compile(
-    r"[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]"
-)
+_COMBINING_MARKS_RE = re.compile(r"[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]")
 
 
 def strip_combining_marks(text: str) -> str:
@@ -194,6 +192,10 @@ def _join_spaced_chars(m: re.Match[str]) -> str:
     if not _THREE_LETTERS_RE.search(run):
         return run
     return " ".join(_PUNCT_SEPARATOR_RE.sub("", w) for w in run.split(" "))
+
+
+_JOINED_WORDS_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]+(?:[-_./,][A-Za-z0-9]+){2,}(?![A-Za-z0-9])")
+_WORD_SEPARATOR_RE = re.compile(r"[-_./,]")
 
 
 def _split_joined_words(m: re.Match[str]) -> str:
