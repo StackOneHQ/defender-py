@@ -142,6 +142,7 @@ Packed-chunk MiniLM classifier (int8 ONNX ~22 MB, bundled):
 - `use_sfe=True` runs a field-level FastText pass to build a **classifier-only** view of the payload
 - **Tier 1** detects on the raw tool value; SFE drops are classifier-only and never remove fields from the returned `sanitized` payload
 - **Tier 2** extracts strings from the SFE-filtered tree; `fields_dropped` lists paths omitted from that extraction (not removed from `sanitized`)
+- If SFE keeps no text Tier 2 would score, Tier 2 scores the original payload instead (single ASCII tokens such as URLs and IDs left out) and sets `sfe_fallback=True`
 - Fails open if the runtime/model is unavailable: payload continues unfiltered
 
 ### Benchmarks
