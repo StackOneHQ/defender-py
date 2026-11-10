@@ -55,6 +55,13 @@ class TestTier2ClassifierConfig:
         assert result.skipped
         assert "too short" in (result.skip_reason or "")
 
+    def test_min_text_length_counts_utf16_units(self):
+        # Matches TS: 5 astral characters are 10 UTF-16 units, so they meet the default of 10.
+        c = Tier2Classifier()
+        astral = "".join(chr(0x20000 + i) for i in range(5))
+        assert c.prepare_chunks(astral[:4])["skip_reason"] == "Text below minTextLength"
+        assert c.prepare_chunks(astral).get("skip_reason") != "Text below minTextLength"
+
     def test_not_ready_without_model(self):
         c = Tier2Classifier(config={"onnx_model_path": "/nonexistent/path"})
         assert not c.is_ready()

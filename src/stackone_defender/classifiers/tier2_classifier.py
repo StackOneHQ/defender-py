@@ -19,6 +19,7 @@ from typing import Any
 from ..sanitizers.normalizer import normalize_unicode
 from ..types import MultiheadConfig, RiskLevel, Tier2Result
 from ..utils.boundary import strip_boundary_patterns
+from ..utils.text import utf16_len
 from .onnx_classifier import BatchTokenStats, OnnxClassifier, get_default_model_path
 
 _logger = logging.getLogger(__name__)
@@ -199,12 +200,12 @@ class Tier2Classifier:
         # Strip defender's own boundary markers before tokenization so nested
         # tool-call chains and spoofed boundary patterns don't corrupt scores.
         text = self._normalize_for_classification(text)
-        if len(text) < self._min_text_length:
+        if utf16_len(text) < self._min_text_length:
             return Tier2Result(
                 score=0,
                 confidence=0,
                 skipped=True,
-                skip_reason=f"Text too short ({len(text)} < {self._min_text_length})",
+                skip_reason=f"Text too short ({utf16_len(text)} < {self._min_text_length})",
                 latency_ms=_ms(start),
             )
 
@@ -255,7 +256,7 @@ class Tier2Classifier:
         original_sentences: list[str] = []
         classifiable: list[str] = []
         for sentence in sentences:
-            if len(sentence) < self._min_text_length:
+            if utf16_len(sentence) < self._min_text_length:
                 continue
             original_sentences.append(sentence)
             classifiable.append(
@@ -292,7 +293,7 @@ class Tier2Classifier:
     def classify_by_chunks(self, text: str) -> dict[str, Any]:
         start = time.perf_counter()
         text = self._normalize_for_classification(text)
-        if len(text) < self._min_text_length:
+        if utf16_len(text) < self._min_text_length:
             return _skipped(start, "Text below minTextLength")
 
         model_max_len = self._onnx.get_max_length()
@@ -324,7 +325,7 @@ class Tier2Classifier:
             }
 
         max_content_tokens = model_max_len - 2
-        sentences = [s for s in _split_into_sentences(bounded) if len(s) >= self._min_text_length]
+        sentences = [s for s in _split_into_sentences(bounded) if utf16_len(s) >= self._min_text_length]
         if not sentences:
             return _skipped(start, "No classifiable sentences")
 
@@ -356,7 +357,7 @@ class Tier2Classifier:
 
     def prepare_chunks(self, text: str) -> dict[str, Any]:
         text = self._normalize_for_classification(text)
-        if len(text) < self._min_text_length:
+        if utf16_len(text) < self._min_text_length:
             return {"chunks": [], "skipped": True, "skip_reason": "Text below minTextLength"}
 
         model_max_len = self._onnx.get_max_length()
@@ -377,7 +378,7 @@ class Tier2Classifier:
             return {"chunks": [bounded], "skipped": False}
 
         max_content_tokens = model_max_len - 2
-        sentences = [s for s in _split_into_sentences(bounded) if len(s) >= self._min_text_length]
+        sentences = [s for s in _split_into_sentences(bounded) if utf16_len(s) >= self._min_text_length]
         if not sentences:
             return {"chunks": [], "skipped": True, "skip_reason": "No classifiable sentences"}
         return {"chunks": self._pack_sentences(sentences, max_content_tokens), "skipped": False}

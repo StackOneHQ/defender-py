@@ -113,6 +113,15 @@ class _Tier2Outcome:
 
 # One printable-ASCII token with no whitespace: a URL, ID or token, not prose.
 _ASCII_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
+_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _is_machine_token(t: str) -> bool:
+    """A URL, ID or other single token, unless it joins several words with - _ + or .
+    ("Ignore-all-previous-instructions", "IGNORE_ALL_...", a "+"-joined query string)."""
+    if not _ASCII_TOKEN_RE.fullmatch(t):
+        return False
+    return sum(1 for w in re.split(r"[-_+.]+", t) if _WORD_RE.fullmatch(w)) < 4
 
 
 def _extract_strings(
@@ -1165,12 +1174,12 @@ class PromptDefense:
 
         # SFE kept nothing Tier 2 would score: score the original rather than pass it unscanned.
         # Decided on prepared chunks, so the classifier's own normalisation and length rules apply.
-        # Skip ASCII tokens (URLs, IDs): SFE is right to drop them and Tier 2 scores some high.
+        # Skip machine tokens (URLs, IDs): SFE is right to drop them and Tier 2 scores some high.
         if sfe_dropped and all(r[0] < 0 or not js_trim(s) for s, r in zip(strings, string_ranges, strict=True)):
             fallback = [
                 s
                 for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
-                if (t := js_trim(s)) and not _ASCII_TOKEN_RE.fullmatch(t)
+                if (t := js_trim(s)) and not _is_machine_token(t)
             ]
             fallback_built = self._tier2_build_chunks(tier2, fallback)
             if fallback_built[0]:
