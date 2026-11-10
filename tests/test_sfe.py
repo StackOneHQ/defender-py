@@ -251,6 +251,15 @@ class TestSfeFallback:
         assert result.sfe_fallback is True
         assert result.allowed is False
 
+    @pytest.mark.parametrize(
+        "status", ["Cafe\u0301 cafe\u0301", " " * 20], ids=["normalises-below-min-length", "whitespace-only"]
+    )
+    def test_falls_back_when_kept_text_produces_no_chunk(self, status):
+        defense = create_prompt_defense(enable_tier1=False, block_high_risk=True, use_sfe={"predictor": _DropNotes()})
+        result = defense.defend_tool_result({"status": status, "notes": _INJECTION}, "test_tool")
+        assert result.sfe_fallback is True
+        assert result.allowed is False
+
     def test_no_fallback_for_whitespace_only_strings(self):
         defense = create_prompt_defense(enable_tier1=False, use_sfe={"predictor": _DropAll()})
         result = defense.defend_tool_result({"notes": " " * 20}, "test_tool")

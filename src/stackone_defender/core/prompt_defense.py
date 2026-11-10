@@ -1159,20 +1159,25 @@ class PromptDefense:
             for s in _extract_strings(sfe_filtered_value, fields_for_tier2, depth_flag)
             if len(s) > 0
         ]
+        # Phase 1: prepare chunks (warmup + tokenize + pack).
+        t_prep_start = time.perf_counter()
+        all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
+
         # SFE kept nothing Tier 2 would score: score the original rather than pass it unscanned.
+        # Decided on prepared chunks, so the classifier's own normalisation and length rules apply.
         # Skip ASCII tokens (URLs, IDs): SFE is right to drop them and Tier 2 scores some high.
-        min_len = int(tier2.get_config().get("min_text_length", 0)) if sfe_dropped else 0
-        # Lengths count like the classifier's min_text_length check (code points), so a kept
-        # string it would skip can't block the fallback.
-        if sfe_dropped and not any(len(s) >= min_len for s in strings):
+        if sfe_dropped and all(r[0] < 0 or not js_trim(s) for s, r in zip(strings, string_ranges, strict=True)):
             fallback = [
                 s
                 for s in _extract_strings(original_value, fields_for_tier2, depth_flag)
-                if len(t := js_trim(s)) >= min_len and not _ASCII_TOKEN_RE.fullmatch(t)
+                if (t := js_trim(s)) and not _ASCII_TOKEN_RE.fullmatch(t)
             ]
-            if fallback:
+            fallback_built = self._tier2_build_chunks(tier2, fallback)
+            if fallback_built[0]:
                 strings = fallback
+                all_chunks, string_ranges, skip_reasons = fallback_built
                 out.sfe_fallback = True
+
         if not strings:
             scoped = fields_for_tier2 is not None and len(fields_for_tier2) > 0
             out.skip_reason = (
@@ -1181,10 +1186,6 @@ class PromptDefense:
                 else "No strings extracted from tool result"
             )
             return out
-
-        # Phase 1: prepare chunks (warmup + tokenize + pack).
-        t_prep_start = time.perf_counter()
-        all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
         if not all_chunks:
             out.skip_reason = (
                 "All strings skipped by classifier"
