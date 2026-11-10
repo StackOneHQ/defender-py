@@ -350,10 +350,10 @@ class TestNormalizeWordSeparators:
         assert normalize_word_separators("ignore-all-previous") == "ignore all previous"
         assert normalize_word_separators("you.are.now") == "you are now"
 
-    def test_joins_spaced_letters_keeping_word_breaks_unless_mixed(self):
+    def test_joins_spaced_letters_word_by_word(self):
         assert normalize_word_separators("I.g.n.o.r.e a.l.l") == "Ignore all"
-        assert normalize_word_separators("i.g n-o r.e") == "ignore"
         assert normalize_word_separators("i.g.n.o.r.e a-l-l") == "ignore all"
+        assert normalize_word_separators("w.h.a.t i.s t.h.e r.u.l.e") == "what is the rule"
 
     @pytest.mark.parametrize("text", ["well-known", "9 a.m.", "2024-01-01", "v1.2.3", "00000000-0000-0000"])
     def test_leaves_compounds_abbreviations_and_digit_runs(self, text):

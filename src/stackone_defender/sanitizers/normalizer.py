@@ -182,31 +182,18 @@ def fold_confusables(text: str) -> str:
     return _WORD_RE.sub(_fold, text)
 
 
-# 3+ single characters split by one space . - or _ ("i.g n-o r.e").
+# 3+ single characters split by one space . - or _ ("i.g.n.o.r.e a-l-l").
 _SPACED_CHARS_RE = re.compile(r"(?<![A-Za-z0-9@$])[A-Za-z0-9@$](?:[ ._-][A-Za-z0-9@$]){2,}(?![A-Za-z0-9@$])")
 _THREE_LETTERS_RE = re.compile(r"[A-Za-z](?:.*[A-Za-z]){2}")
 _PUNCT_SEPARATOR_RE = re.compile(r"[._-]")
 
 
 def _join_spaced_chars(m: re.Match[str]) -> str:
-    """Join a run of spaced-out characters when 3+ are letters.
-
-    When each space-separated part has 3+ letters joined by one punctuation mark
-    (``"I.g.n.o.r.e a-l-l"``) spaces are word breaks; otherwise
-    (``"i.g n-o r.e"``) they are part of the scrambling.
-    """
+    """Join each space-separated part of a spaced-out run when the run has 3+ letters."""
     run = m.group(0)
     if not _THREE_LETTERS_RE.search(run):
         return run
-    words = run.split(" ")
-    scrambled = any(
-        len(_HAS_ASCII_LETTER_RE.findall(w)) < 3 or len(set(_PUNCT_SEPARATOR_RE.findall(w))) > 1 for w in words
-    )
-    if scrambled:
-        return re.sub(r"[ ._-]", "", run)
-    return " ".join(_PUNCT_SEPARATOR_RE.sub("", w) for w in words)
-_JOINED_WORDS_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]+(?:[-_./,][A-Za-z0-9]+){2,}(?![A-Za-z0-9])")
-_WORD_SEPARATOR_RE = re.compile(r"[-_./,]")
+    return " ".join(_PUNCT_SEPARATOR_RE.sub("", w) for w in run.split(" "))
 
 
 def _split_joined_words(m: re.Match[str]) -> str:
@@ -220,7 +207,7 @@ def _split_joined_words(m: re.Match[str]) -> str:
 def normalize_word_separators(text: str) -> str:
     """Join spaced-out letters, then split words joined by separators.
 
-    ``"i.g n-o r.e"`` -> ``"ignore"``; runs of 3+ words joined by ``- _ . / ,``
+    ``"i.g.n.o.r.e a-l-l"`` -> ``"ignore all"``; runs of 3+ words joined by ``- _ . / ,``
     (``"ignore-previous-instructions"``) become space-separated. Two-word
     compounds (``"well-known"``), short abbreviations (``"a.m."``) and
     digit-only runs are left alone.
