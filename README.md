@@ -120,7 +120,7 @@ The default open source scan combines two local detection layers:
 
 Detects (never rewrites) injection signals and records them as evidence:
 
-- **Unicode / leet normalization** (for matching only): homoglyph resistance (e.g. Cyrillic `а` → ASCII `a`)
+- **Obfuscation normalization** (for matching only): undoes Greek and Cyrillic look-alikes, leetspeak, words joined by `-` `_` `.`, spaced-out letters and control characters. Tier 2 scores the same normalized text; the returned content is never normalized
 - **Role markers**: `SYSTEM:`, `ASSISTANT:`, `<system>`, `[INST]`, etc.
 - **Instruction-override patterns**: phrases like "ignore previous instructions"
 - **Encoding detection**: decode-then-detect: a decoded payload is escalated only if it trips a real attack pattern

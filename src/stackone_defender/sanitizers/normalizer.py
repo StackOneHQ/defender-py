@@ -17,6 +17,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from .leet_normalizer import normalize_leet_speak
+
 
 def normalize_unicode(text: str) -> str:
     """Normalize Unicode text using NFKC normalization.
@@ -56,7 +58,8 @@ def strip_combining_marks(text: str) -> str:
     return _COMBINING_MARKS_RE.sub("", text)
 
 
-_LETTER_SPACING_RE = re.compile(r"\b(?:[a-zA-Z] ){2,}[a-zA-Z]\b")
+# ASCII \b, as in JavaScript.
+_LETTER_SPACING_RE = re.compile(r"\b(?:[a-zA-Z] ){2,}[a-zA-Z]\b", re.ASCII)
 _EMBEDDED_NEWLINE_RE = re.compile(r"([a-zA-Z])[\r\n]+([a-zA-Z])")
 
 
@@ -74,16 +77,33 @@ def normalize_whitespace(text: str) -> str:
     Operates on ASCII letters only. Must run **after** ``normalize_unicode``
     so any Cyrillic/fullwidth homoglyphs are already folded to ASCII.
     """
+    return join_line_split_words(collapse_spaced_letters(text))
+
+
+def collapse_spaced_letters(text: str) -> str:
+    """Collapse letter-by-letter spacing: ``"S Y S T E M"`` -> ``"SYSTEM"``."""
     if not text:
         return text
-    result = _LETTER_SPACING_RE.sub(lambda m: m.group(0).replace(" ", ""), text)
-    result = _EMBEDDED_NEWLINE_RE.sub(r"\1\2", result)
-    return result
+    return _LETTER_SPACING_RE.sub(lambda m: m.group(0).replace(" ", ""), text)
+
+
+def join_line_split_words(text: str) -> str:
+    """Remove line breaks between adjacent letters (``"ign\\nore"`` -> ``"ignore"``).
+
+    Tier 1 only: it also joins the words of ordinary multi-line text, which
+    would hurt Tier 2's scoring.
+    """
+    if not text:
+        return text
+    return _EMBEDDED_NEWLINE_RE.sub(r"\1\2", text)
 
 
 _REPLACEMENTS: list[tuple[re.Pattern, str]] = [
     # Zero-width characters
     (re.compile(r"[\u200b-\u200d\ufeff]"), ""),
+    # ANSI escapes and C0 control characters (not tab, LF, CR). A space, not "":
+    # they are spliced in place of spaces ("ignore<ESC>all") to break \s+ patterns.
+    (re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f]"), " "),
     # Cyrillic homoglyphs
     (re.compile(r"[\u0430]"), "a"),
     (re.compile(r"[\u0435]"), "e"),
@@ -112,6 +132,99 @@ def _normalize_special_characters(text: str) -> str:
     for pattern, replacement in _REPLACEMENTS:
         result = pattern.sub(replacement, result)
     return result
+
+
+# Greek and Cyrillic letters that look like Latin ones, and their Latin letter
+# (the 8 common Cyrillic ones are mapped unconditionally in normalize_unicode).
+_CONFUSABLE_FROM = "αγεικνορτυχωϲϳΑΒΕΖΗΙΚΜΝΟΡΤΥΧјѕԁһӏԛԝкАВЕКМНОРСТХУІЈЅıɡɑ"
+_CONFUSABLE_TO = "ayeikvoptuxwcjABEZHIKMNOPTYXjsdhlqwkABEKMHOPCTXYIJSiga"
+_CONFUSABLES = str.maketrans(_CONFUSABLE_FROM, _CONFUSABLE_TO)
+_CONFUSABLE_SET = frozenset(_CONFUSABLE_FROM)
+_CONFUSABLE_RE = re.compile(f"[{_CONFUSABLE_FROM}]")
+_GREEK_CYRILLIC_RE = re.compile(r"[\u0370-\u03ff\u0400-\u04ff\u0500-\u052f]")
+# Letters and digits, like JavaScript's [\p{L}\p{N}].
+_WORD_RE = re.compile(r"[^\W_]+")
+_HAS_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
+
+
+def fold_confusables(text: str) -> str:
+    """Fold Greek/Cyrillic look-alikes to Latin.
+
+    Only inside words that also hold a Latin letter, or anywhere when the text
+    has no Greek/Cyrillic letter without a Latin look-alike, so real Greek or
+    Russian text is left alone.
+    """
+    if not text or not _CONFUSABLE_RE.search(text):
+        return text
+    native_script = any(c not in _CONFUSABLE_SET for c in _GREEK_CYRILLIC_RE.findall(text))
+
+    def _fold(m: re.Match[str]) -> str:
+        word = m.group(0)
+        if not _CONFUSABLE_RE.search(word) or (native_script and not _HAS_ASCII_LETTER_RE.search(word)):
+            return word
+        return word.translate(_CONFUSABLES)
+
+    return _WORD_RE.sub(_fold, text)
+
+
+# 3+ single characters split by one space . - or _ ("i.g n-o r.e").
+_SPACED_CHARS_RE = re.compile(r"(?<![A-Za-z0-9@$])[A-Za-z0-9@$](?:[ ._-][A-Za-z0-9@$]){2,}(?![A-Za-z0-9@$])")
+_THREE_LETTERS_RE = re.compile(r"[A-Za-z](?:.*[A-Za-z]){2}")
+_PUNCT_SEPARATOR_RE = re.compile(r"[._-]")
+
+
+def _join_spaced_chars(m: re.Match[str]) -> str:
+    """Join a run of spaced-out characters when 3+ are letters.
+
+    With one punctuation mark (``"I.g.n.o.r.e a.l.l"``) spaces are word breaks;
+    with several mixed (``"i.g n-o r.e"``) they are part of the scrambling.
+    """
+    run = m.group(0)
+    if not _THREE_LETTERS_RE.search(run):
+        return run
+    if len(set(_PUNCT_SEPARATOR_RE.findall(run))) > 1:
+        return re.sub(r"[ ._-]", "", run)
+    return " ".join(_PUNCT_SEPARATOR_RE.sub("", w) for w in run.split(" "))
+_JOINED_WORDS_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]+(?:[-_./,][A-Za-z0-9]+){2,}(?![A-Za-z0-9])")
+_WORD_SEPARATOR_RE = re.compile(r"[-_./,]")
+
+
+def _split_joined_words(m: re.Match[str]) -> str:
+    parts = _WORD_SEPARATOR_RE.split(m.group(0))
+    # Digit-only runs (dates, zero GUIDs, versions) stay as they are.
+    if sum(1 for w in parts if _HAS_ASCII_LETTER_RE.search(w)) < 2:
+        return m.group(0)
+    return " ".join(parts)
+
+
+def normalize_word_separators(text: str) -> str:
+    """Join spaced-out letters, then split words joined by separators.
+
+    ``"i.g n-o r.e"`` -> ``"ignore"``; runs of 3+ words joined by ``- _ . / ,``
+    (``"ignore-previous-instructions"``) become space-separated. Two-word
+    compounds (``"well-known"``), short abbreviations (``"a.m."``) and
+    digit-only runs are left alone.
+    """
+    if not text:
+        return text
+    return _JOINED_WORDS_RE.sub(_split_joined_words, _SPACED_CHARS_RE.sub(_join_spaced_chars, text))
+
+
+def normalize_for_detection(text: str) -> str:
+    """The analysis copy both tiers scan. Never returned to callers.
+
+    Undoes control characters, combining marks, unicode variants, look-alikes,
+    joined words, spaced letters and leet.
+    """
+    if not text:
+        return text
+    return normalize_leet_speak(
+        collapse_spaced_letters(
+            normalize_word_separators(
+                fold_confusables(normalize_unicode(strip_combining_marks(unicodedata.normalize("NFD", text))))
+            )
+        )
+    )
 
 
 def contains_suspicious_unicode(text: str) -> bool:

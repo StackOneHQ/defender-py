@@ -100,14 +100,16 @@ def detect_encoding(
 
 def _detect_base64(text: str, min_length: int) -> list[EncodingDetection]:
     detections: list[EncodingDetection] = []
-    for m in re.finditer(r"[A-Za-z0-9+/]{20,}={0,2}", text):
+    # Standard or URL-safe (-_) alphabet.
+    for m in re.finditer(r"[A-Za-z0-9+/\-_]{20,}={0,2}", text):
         candidate = m.group(0)
         if len(candidate) < min_length:
             continue
         try:
             # Pad to a multiple of 4; b64decode rejects unpadded input, which
             # the except below would silently drop (JS atob tolerates it).
-            padded = candidate + "=" * (-len(candidate) % 4)
+            unpadded = candidate.replace("-", "+").replace("_", "/").rstrip("=")
+            padded = unpadded + "=" * (-len(unpadded) % 4)
             decoded_bytes = base64.b64decode(padded, validate=False)
             try:
                 decoded = decoded_bytes.decode("ascii")

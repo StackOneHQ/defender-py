@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from ..sanitizers.normalizer import normalize_unicode
+from ..sanitizers.normalizer import normalize_for_detection, normalize_unicode
 from ..types import MultiheadConfig, RiskLevel, Tier2Result
 from ..utils.boundary import strip_boundary_patterns
 from ..utils.text import utf16_len
@@ -190,10 +190,11 @@ class Tier2Classifier:
     _DECORATIVE_RUN = re.compile(r"([^\w\s])\1{3,}")
 
     def _normalize_for_classification(self, text: str) -> str:
-        # NFKC-fold unicode (fullwidth/math-styled -> ASCII) so obfuscated attacks
-        # tokenize as real words instead of [UNK]; then strip boundary markers and
-        # collapse decorative runs. Classifier input only — payload never mutated.
-        return self._DECORATIVE_RUN.sub(r"\1\1\1", strip_boundary_patterns(normalize_unicode(text)))
+        # Strip boundary markers, undo obfuscation with the normaliser Tier 1 uses,
+        # then collapse decorative runs. Classifier input only — payload never mutated.
+        return self._DECORATIVE_RUN.sub(
+            r"\1\1\1", normalize_for_detection(strip_boundary_patterns(normalize_unicode(text)))
+        )
 
     def classify(self, text: str) -> Tier2Result:
         start = time.perf_counter()

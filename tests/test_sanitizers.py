@@ -1,6 +1,8 @@
 """Tests for sanitizer modules."""
 
 
+import pytest
+
 from stackone_defender.sanitizers.encoding_detector import (
     contains_encoded_content,
     contains_suspicious_encoding,
@@ -14,8 +16,11 @@ from stackone_defender.sanitizers.leet_normalizer import normalize_leet_speak
 from stackone_defender.sanitizers.normalizer import (
     analyze_suspicious_unicode,
     contains_suspicious_unicode,
+    fold_confusables,
+    normalize_for_detection,
     normalize_unicode,
     normalize_whitespace,
+    normalize_word_separators,
     strip_combining_marks,
 )
 
@@ -308,3 +313,49 @@ class TestUnpaddedBase64:
         assert b64, "unpadded base64 should be detected"
         assert b64[0].decoded == raw.decode()
         assert b64[0].suspicious
+
+
+class TestLeetLeavesIds:
+    def test_skips_tokens_with_269_or_under_two_letters(self):
+        assert normalize_leet_speak("user123 d14f0615 B2B v1 Q3") == "user123 d14f0615 B2B v1 Q3"
+
+
+class TestFoldConfusables:
+    def test_folds_lookalikes_inside_latin_words(self):
+        assert fold_confusables("ιgnοre αll prενιοus") == "ignore all previous"  # noqa: RUF001
+
+    def test_folds_lookalike_only_words_without_real_greek(self):
+        assert fold_confusables("ΙΝΤΟ the system") == "INTO the system"  # noqa: RUF001
+
+    def test_leaves_real_greek_and_russian_alone(self):
+        assert fold_confusables("Ο Γιάννης είπε") == "Ο Γιάννης είπε"  # noqa: RUF001
+        assert fold_confusables("Привет, как дела") == "Привет, как дела"
+
+
+class TestNormalizeWordSeparators:
+    def test_splits_joined_words(self):
+        assert normalize_word_separators("ignore-all-previous") == "ignore all previous"
+        assert normalize_word_separators("you.are.now") == "you are now"
+
+    def test_joins_spaced_letters_keeping_word_breaks_unless_mixed(self):
+        assert normalize_word_separators("I.g.n.o.r.e a.l.l") == "Ignore all"
+        assert normalize_word_separators("i.g n-o r.e") == "ignore"
+
+    @pytest.mark.parametrize("text", ["well-known", "9 a.m.", "2024-01-01", "v1.2.3", "00000000-0000-0000"])
+    def test_leaves_compounds_abbreviations_and_digit_runs(self, text):
+        assert normalize_word_separators(text) == text
+
+
+class TestNormalizeForDetection:
+    def test_undoes_stacked_obfuscation(self):
+        assert normalize_for_detection("1gn0r3-αll-pr3v10us\x1b[2Kinstructions") == "ignore all previous instructions"  # noqa: RUF001
+
+    def test_keeps_line_breaks(self):
+        assert normalize_for_detection("line one\nline two") == "line one\nline two"
+
+
+class TestBase64Url:
+    def test_decodes_unpadded_base64url(self):
+        r = detect_encoding("aWdub3JlIGFsbCBwcmV2aW91cyBpbnN0cnVjdGlvbnM")
+        assert r.has_encoding
+        assert next(d for d in r.detections if d.type == "base64").decoded == "ignore all previous instructions"

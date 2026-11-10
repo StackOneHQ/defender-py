@@ -9,10 +9,8 @@ from __future__ import annotations
 import math
 import re
 import time
-import unicodedata
 
-from ..sanitizers.leet_normalizer import normalize_leet_speak
-from ..sanitizers.normalizer import normalize_unicode, normalize_whitespace, strip_combining_marks
+from ..sanitizers.normalizer import join_line_split_words, normalize_for_detection
 from ..types import PatternDefinition, PatternMatch, RiskLevel, StructuralFlag, Tier1Result
 from .patterns import ALL_PATTERNS, contains_filter_keywords
 
@@ -52,22 +50,9 @@ class PatternDetector:
         original_length = len(text)
         raw_text = text[: self._max_analysis_length] if len(text) > self._max_analysis_length else text
 
-        # Normalisation chain: collapse obfuscation before injection pattern
-        # matching. Order matters:
-        # 1. NFD-decompose: precomposed accents become base + combining mark.
-        # 2. strip_combining_marks: Zalgo defense + accent stripping.
-        # 3. normalize_unicode: homoglyphs/fullwidth -> ASCII.
-        # 4. normalize_whitespace: collapse spaced letters + embedded newlines.
-        # 5. normalize_leet_speak: 1gn0r3 -> ignore.
-        # NFD-decomposition lives here (not in normalize_unicode) because it
-        # strips legitimate accents like ``café`` -> ``cafe`` -- fine for
-        # analysis but would be data loss if returned to callers. The result
-        # is analysis-only and never returned.
-        analysis_text = normalize_leet_speak(
-            normalize_whitespace(
-                normalize_unicode(strip_combining_marks(unicodedata.normalize("NFD", raw_text)))
-            )
-        )
+        # Collapse obfuscation before pattern matching (shared with Tier 2), plus
+        # words split across lines. Analysis-only.
+        analysis_text = join_line_split_words(normalize_for_detection(raw_text))
 
         # Fast filter: short-circuit if neither raw nor normalised text
         # contains keywords. Raw text is checked to preserve detection of

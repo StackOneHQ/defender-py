@@ -41,6 +41,7 @@ PROTECTED_SEQUENCE = re.compile(
 
 _TOKEN_RE = re.compile(r"[@a-zA-Z0-9!$]+")
 _HAS_LETTER_RE = re.compile(r"[a-zA-Z]")
+_NON_LEET_DIGIT_RE = re.compile(r"[269]")
 _ALNUM_RE = re.compile(r"[a-zA-Z0-9]")
 
 
@@ -82,7 +83,9 @@ def _apply_leet_map_token_aware(text: str) -> str:
 
     def _repl(match: re.Match[str]) -> str:
         token = match.group(0)
-        if not _HAS_LETTER_RE.search(token):
+        # Only words with 2+ letters whose digits are all leet digits: leaves IDs,
+        # hashes and versions ("user123", "d14f0615", "v2") alone.
+        if len(_HAS_LETTER_RE.findall(token)) < 2 or _NON_LEET_DIGIT_RE.search(token):
             return token
         return _apply_leet_map_chars(token)
 
