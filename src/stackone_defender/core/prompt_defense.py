@@ -22,6 +22,7 @@ from ..classifiers.tier3_orchestrator import get_default_tier3_provider
 from ..config import MAX_TRAVERSAL_DEPTH, create_config
 from ..sfe.preprocess import SfePredictor, get_default_predictor, sfe_preprocess
 from ..types import (
+    DataBoundary,
     DefenderMode,
     DefenseResult,
     MultiheadConfig,
@@ -949,22 +950,7 @@ class PromptDefense:
         # sanitized is a sentence-cleaned copy of the detect-only payload's high-risk
         # fields (unless sanitize_content is off). fields_sanitized reports the fields
         # the cleaner actually changed.
-        original = sanitized.sanitized
-        if (
-            self._sanitize_content
-            and self._tier2 is not None
-            and risk_level in ("high", "critical")
-            and tier2.high_risk_values
-        ):
-            cleaned, cleaned_fields = clean_high_risk_content(
-                original,
-                tier2.high_risk_values,
-                self._tier2,
-                self._config.tier2.high_risk_threshold,
-                boundary,
-            )
-        else:
-            cleaned, cleaned_fields = original, []
+        cleaned, cleaned_fields, clean_failed = self._clean_content(sanitized.sanitized, tier2, risk_level, boundary)
 
         return DefenseResult(
             allowed=allowed,
@@ -990,7 +976,10 @@ class PromptDefense:
             tier1_ms=tier1_ms,
             cold_load=tier2.cold_load,
             tier2_available=tier2.tier2_available,
-            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag) or tier2.payload_error or None,
+            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag)
+            or tier2.payload_error
+            or clean_failed
+            or None,
         )
 
     def _defend_tool_result_sync(
@@ -1097,22 +1086,7 @@ class PromptDefense:
 
         # sanitized is the sentence-cleaned copy of the detect-only payload.
         # fields_sanitized reports the fields the cleaner actually changed.
-        original = sanitized.sanitized
-        if (
-            self._sanitize_content
-            and self._tier2 is not None
-            and risk_level in ("high", "critical")
-            and tier2.high_risk_values
-        ):
-            cleaned, cleaned_fields = clean_high_risk_content(
-                original,
-                tier2.high_risk_values,
-                self._tier2,
-                self._config.tier2.high_risk_threshold,
-                boundary,
-            )
-        else:
-            cleaned, cleaned_fields = original, []
+        cleaned, cleaned_fields, clean_failed = self._clean_content(sanitized.sanitized, tier2, risk_level, boundary)
 
         return DefenseResult(
             allowed=allowed,
@@ -1137,12 +1111,35 @@ class PromptDefense:
             tier1_ms=tier1_ms,
             cold_load=tier2.cold_load,
             tier2_available=tier2.tier2_available,
-            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag) or tier2.payload_error or None,
+            coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag)
+            or tier2.payload_error
+            or clean_failed
+            or None,
         )
 
     # ------------------------------------------------------------------
     # Tier 2 helpers
     # ------------------------------------------------------------------
+
+    def _clean_content(
+        self, original: Any, tier2: _Tier2Outcome, risk_level: RiskLevel, boundary: DataBoundary | None
+    ) -> tuple[Any, list[str], bool]:
+        if not (
+            self._sanitize_content
+            and self._tier2 is not None
+            and risk_level in ("high", "critical")
+            and tier2.high_risk_values
+        ):
+            return original, [], False
+        try:
+            cleaned, fields = clean_high_risk_content(
+                original, tier2.high_risk_values, self._tier2, self._config.tier2.high_risk_threshold, boundary
+            )
+        except Exception:
+            # The cleaner walks the payload again. If that throws, keep the original
+            # (the block decision already stands) and flag degraded coverage.
+            return original, [], True
+        return cleaned, fields, False
     #
     # ``defend_tool_result`` orchestrates Tier 1 + Tier 2. The Tier 2 path
     # is split into five focused steps below to keep that orchestration

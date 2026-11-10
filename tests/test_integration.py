@@ -879,6 +879,18 @@ class TestNonJsonContainers:
         r = create_prompt_defense(block_high_risk=True).defend_tool_result(make(self._INJ), "docs_get")
         assert r.allowed is False
 
+    @pytest.mark.model
+    def test_cleaner_error_keeps_original(self):
+        class ItemsRaise(UserDict):
+            def items(self):
+                raise RuntimeError("boom")
+
+        payload = ItemsRaise(note=self._INJ)
+        r = create_prompt_defense(block_high_risk=True).defend_tool_result(payload, "docs_get")
+        assert r.allowed is False
+        assert r.sanitized is payload
+        assert r.coverage_degraded is True
+
     def test_tuple_keeps_its_type_in_sanitized(self):
         r = create_prompt_defense(enable_tier2=False).defend_tool_result({"x": ("a", "b")}, "docs_get")
         assert r.sanitized == {"x": ("a", "b")}
