@@ -486,3 +486,10 @@ class TestSeparatorAndControlObfuscation:
     def test_tab_newline_not_control_characters(self):
         r = PatternDetector().analyze("line one\nline two\tindented\r\nline three")
         assert "c0_control_character" not in {m.pattern for m in r.matches}
+
+
+def test_act_as_admin_or_administrator_only():
+    d = PatternDetector()
+    for t in ["act as an admin", "act as administrator"]:
+        assert "act_as" in {m.pattern for m in d.analyze(t).matches}
+    assert "act_as" not in {m.pattern for m in d.analyze("act as administration staff").matches}
