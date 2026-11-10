@@ -78,23 +78,29 @@ _SHORT_WORDS = frozenset(
     ).split()
 )
 _HEX_RE = re.compile(r"[0-9a-fA-F]+")
-_EDGE_DIGITS_RE = re.compile(r"^[0-9]+|[0-9]+$")
+_EDGE_RE = re.compile(r"^([0-9]+)(.*)$|^(.*?)([0-9]+)$", re.S)
+_LEET_CHAR_RE = re.compile(r"[0134578@!$]")
 
 
 def _is_identifier_like(token: str) -> bool:
     """IDs, hashes and versions (``"user123"``, ``"d14f0615"``, ``"v2"``).
 
     Under 2 letters (unless a short word), hex with a digit, or at either end
-    4+ digits or 2+ with a 2, 6 or 9 (``"COVID19"``, ``"user123"``, not
-    ``"rul35"`` or ``"573al"``). Leet in them would only produce noise.
+    4+ digits, or 2-3 with a 2, 6 or 9 when the rest has no leet (``"COVID19"``,
+    ``"user123"``, not ``"rul35"``, ``"573al"`` or ``"22ign0re"``). Leet in them
+    would only produce noise.
     """
     if len(_HAS_LETTER_RE.findall(token)) < 2:
-        return _apply_leet_map_chars(token).lower() not in _SHORT_WORDS
+        return _NON_LEET_DIGIT_RE.sub("", _apply_leet_map_chars(token)).lower() not in _SHORT_WORDS
     if len(token) >= 6 and _HEX_RE.fullmatch(token) and any(c.isdigit() for c in token):
         return True
-    return any(
-        (len(run) >= 2 and _NON_LEET_DIGIT_RE.search(run)) or len(run) >= 4 for run in _EDGE_DIGITS_RE.findall(token)
-    )
+    # A short digit run marks an ID only when the rest has no leet ("user123", not "22ign0re").
+    edge = _EDGE_RE.match(token)
+    if not edge:
+        return False
+    run = edge.group(1) if edge.group(1) is not None else edge.group(4)
+    rest = edge.group(2) if edge.group(1) is not None else edge.group(3)
+    return len(run) >= 4 or (len(run) >= 2 and bool(_NON_LEET_DIGIT_RE.search(run)) and not _LEET_CHAR_RE.search(rest))
 
 
 def _apply_leet_map_token_aware(text: str) -> str:
