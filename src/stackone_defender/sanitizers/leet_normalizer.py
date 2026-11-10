@@ -103,7 +103,7 @@ def _is_identifier_like(token: str) -> bool:
     return len(run) >= 4 or (len(run) >= 2 and bool(_NON_LEET_DIGIT_RE.search(run)) and not _LEET_CHAR_RE.search(rest))
 
 
-def _apply_leet_map_token_aware(text: str) -> str:
+def _apply_leet_map_token_aware(text: str, protect_ids: bool) -> str:
     """Token-aware leet substitution.
 
     Splits text into alphanumeric tokens (``[@a-zA-Z0-9!$]+``) and
@@ -117,7 +117,7 @@ def _apply_leet_map_token_aware(text: str) -> str:
 
     def _repl(match: re.Match[str]) -> str:
         token = match.group(0)
-        if not _HAS_LETTER_RE.search(token) or _is_identifier_like(token):
+        if not _HAS_LETTER_RE.search(token) or (protect_ids and _is_identifier_like(token)):
             return token
         mapped = _apply_leet_map_chars(token)
         # Digits left in a leet word are padding ("d1sreg4rd2").
@@ -126,7 +126,7 @@ def _apply_leet_map_token_aware(text: str) -> str:
     return _TOKEN_RE.sub(_repl, text)
 
 
-def normalize_leet_speak(text: str) -> str:
+def normalize_leet_speak(text: str, protect_ids: bool = True) -> str:
     """Normalize leet-speak substitutions in text.
 
     Converts digit and symbol substitutions back to their alphabetic
@@ -145,8 +145,8 @@ def normalize_leet_speak(text: str) -> str:
     segments: list[str] = []
     last_index = 0
     for match in PROTECTED_SEQUENCE.finditer(text):
-        segments.append(_apply_leet_map_token_aware(text[last_index : match.start()]))
+        segments.append(_apply_leet_map_token_aware(text[last_index : match.start()], protect_ids))
         segments.append(match.group(0))
         last_index = match.end()
-    segments.append(_apply_leet_map_token_aware(text[last_index:]))
+    segments.append(_apply_leet_map_token_aware(text[last_index:], protect_ids))
     return "".join(segments)

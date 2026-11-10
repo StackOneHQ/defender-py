@@ -76,7 +76,7 @@ ROLE_ASSUMPTION_PATTERNS: list[PatternDefinition] = [
         "high",
         "Attempt to assign new role",
     ),
-    PatternDefinition("act_as", re.compile(r"act\s+(?:as|like)\s+(?:an?\s+)?(?:system|admin|developer|root|superuser)", re.I), "role_assumption", "high", "Attempt to make AI act as privileged role"),
+    PatternDefinition("act_as", re.compile(r"act\s+(?:as|like)\s+(?:an?\s+)?(?:system|admin|developer|root|superuser)\b", re.I), "role_assumption", "high", "Attempt to make AI act as privileged role"),
     # pretend_to_be: require an attack-shaped role-noun. Previously matched any
     # "pretend to be ..." prefix, FPing on children's literature, drama
     # exercises, jokes. Role list overlaps with `you_are_now` plus privilege

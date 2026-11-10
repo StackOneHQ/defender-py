@@ -380,7 +380,11 @@ class TestInvisibleAndControlCharacters:
         assert normalize_for_detection("i\u00adgn\u2060ore") == "ignore"
 
     def test_8bit_csi_and_c1_become_spaces(self):
-        assert normalize_for_detection("ignore\x9b2Kall\x85x") == "ignore all\x85x"
+        assert normalize_for_detection("ignore\x9b2Kall\x85previous") == "ignore all previous"
+
+    def test_alternate_reading_turns_invisibles_into_spaces(self):
+        assert normalize_for_detection("ignore\u00adall", alternate=True) == "ignore all"
+        assert normalize_for_detection("act as r007", alternate=True) == "act as root"
 
     def test_normalize_unicode_keeps_control_characters(self):
         assert normalize_unicode("a\x1b[31mb") == "a\x1b[31mb"

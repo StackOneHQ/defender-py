@@ -51,8 +51,15 @@ class PatternDetector:
         raw_text = text[: self._max_analysis_length] if len(text) > self._max_analysis_length else text
 
         # Collapse obfuscation before pattern matching (shared with Tier 2), plus
-        # words split across lines or joined in pairs. Analysis-only.
-        analysis_text = split_joined_word_pairs(join_line_split_words(normalize_for_detection(raw_text)))
+        # words split across lines or joined in pairs. Ambiguous text is also
+        # scanned in its other reading (invisible characters as spaces, leet in
+        # ID-like tokens): patterns are specific enough that scanning both costs
+        # little. Analysis-only.
+        def tier1_copy(alternate: bool) -> str:
+            return split_joined_word_pairs(join_line_split_words(normalize_for_detection(raw_text, alternate=alternate)))
+
+        analysis_text = tier1_copy(False)
+        alternate_text = tier1_copy(True)
 
         # Fast filter: short-circuit if neither raw nor normalised text
         # contains keywords. Raw text is checked to preserve detection of
@@ -63,14 +70,17 @@ class PatternDetector:
         should_use_fast_filter = self._use_fast_filter and not self._has_custom
         raw_has_keywords = not should_use_fast_filter or contains_filter_keywords(raw_text)
         norm_has_keywords = not should_use_fast_filter or contains_filter_keywords(analysis_text)
+        alt_has_keywords = alternate_text != analysis_text and (
+            not should_use_fast_filter or contains_filter_keywords(alternate_text)
+        )
 
-        if not raw_has_keywords and not norm_has_keywords:
+        if not raw_has_keywords and not norm_has_keywords and not alt_has_keywords:
             flags = self._detect_structural_issues(raw_text, original_length)
             return self._create_result([], flags, start)
 
         # Short-circuit: if normalisation produced no change, a single pass
         # is sufficient and avoids doubling pattern work for plain-text input.
-        if raw_text == analysis_text:
+        if raw_text == analysis_text and alternate_text == analysis_text:
             matches = self._detect_patterns(raw_text) if raw_has_keywords else []
             flags = self._detect_structural_issues(raw_text, original_length)
             return self._create_result(matches, flags, start)
@@ -82,32 +92,37 @@ class PatternDetector:
         # fast-filter hits), we still want the raw pass to fire obfuscation
         # patterns like leetspeak_injection.
         raw_matches = (
-            self._detect_patterns(raw_text) if (raw_has_keywords or norm_has_keywords) else []
+            self._detect_patterns(raw_text) if (raw_has_keywords or norm_has_keywords or alt_has_keywords) else []
         )
 
         # Run patterns on normalised text -- catches injection patterns
         # hidden behind leet-speak, whitespace, or homoglyph obfuscation.
         # Matches are tagged ``normalised=True`` because their
         # position/matched values reference the transformed text.
-        norm_matches_raw = self._detect_patterns(analysis_text) if norm_has_keywords else []
-        norm_matches = [
-            PatternMatch(
-                pattern=m.pattern,
-                matched=m.matched,
-                position=m.position,
-                category=m.category,
-                severity=m.severity,
-                normalised=True,
-            )
-            for m in norm_matches_raw
-        ]
+        def normalised(matches: list[PatternMatch]) -> list[PatternMatch]:
+            return [
+                PatternMatch(
+                    pattern=m.pattern,
+                    matched=m.matched,
+                    position=m.position,
+                    category=m.category,
+                    severity=m.severity,
+                    normalised=True,
+                )
+                for m in matches
+            ]
 
-        # Merge: normalised matches take priority. Raw-only matches are
+        norm_matches = normalised(self._detect_patterns(analysis_text)) if norm_has_keywords else []
+        alt_matches = normalised(self._detect_patterns(alternate_text)) if alt_has_keywords else []
+
+        # Merge: normalised matches take priority, then the alternate reading's. Raw-only matches are
         # appended for patterns that fired on the original text but not the
         # normalised form (e.g. obfuscation-detection patterns that match the
         # raw encoding characters).
         seen_patterns = {m.pattern for m in norm_matches}
-        merged_matches: list[PatternMatch] = [*norm_matches]
+        alt_only = [m for m in alt_matches if m.pattern not in seen_patterns]
+        seen_patterns.update(m.pattern for m in alt_only)
+        merged_matches: list[PatternMatch] = [*norm_matches, *alt_only]
         merged_matches.extend(m for m in raw_matches if m.pattern not in seen_patterns)
 
         flags = self._detect_structural_issues(raw_text, original_length)

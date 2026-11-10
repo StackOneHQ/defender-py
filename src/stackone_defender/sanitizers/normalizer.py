@@ -219,31 +219,37 @@ def normalize_word_separators(text: str) -> str:
     return _JOINED_WORDS_RE.sub(_split_joined_words, _SPACED_CHARS_RE.sub(_join_spaced_chars, text))
 
 
-# ANSI escapes (7- and 8-bit) and C0/C1 control characters (not tab, LF, CR, NEL).
+# ANSI escapes (7- and 8-bit) and C0/C1 control characters (not tab, LF, CR).
 # A space, not "": they are spliced in place of spaces ("ignore<ESC>all") to break \s+ patterns.
 _CONTROL_RE = re.compile(
-    r"\x1b\[[0-9;?]*[A-Za-z]|\x9b[0-9;?]*[A-Za-z]|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f]"
+    r"\x1b\[[0-9;?]*[A-Za-z]|\x9b[0-9;?]*[A-Za-z]|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
 )
 # Invisible format characters normalize_unicode keeps: soft hyphen, Mongolian vowel
 # separator, LRM/RLM, word joiner and invisible operators, variation selectors.
 _INVISIBLE_RE = re.compile(r"[\u00ad\u180e\u200e\u200f\u2060-\u2064\ufe00-\ufe0f]")
+# The same plus the zero-width characters normalize_unicode drops, for the alternate reading.
+_ALL_INVISIBLE_RE = re.compile(r"[\u00ad\u180e\u200b-\u200f\u2060-\u2064\ufeff\ufe00-\ufe0f]")
 
 
-def normalize_for_detection(text: str) -> str:
+def normalize_for_detection(text: str, *, alternate: bool = False) -> str:
     """The analysis copy both tiers scan. Never returned to callers.
 
     Undoes control characters, combining marks, unicode variants, look-alikes,
-    joined words, spaced letters and leet.
+    joined words, spaced letters and leet. ``alternate`` gives the other reading
+    of ambiguous text, for Tier 1: invisible characters as spaces rather than
+    removed, and leet reversed in ID-like tokens too.
     """
     if not text:
         return text
-    text = _INVISIBLE_RE.sub("", _CONTROL_RE.sub(" ", text))
+    text = _CONTROL_RE.sub(" ", text)
+    text = _ALL_INVISIBLE_RE.sub(" ", text) if alternate else _INVISIBLE_RE.sub("", text)
     return normalize_leet_speak(
         collapse_spaced_letters(
             normalize_word_separators(
                 fold_confusables(normalize_unicode(strip_combining_marks(unicodedata.normalize("NFD", text))))
             )
-        )
+        ),
+        protect_ids=not alternate,
     )
 
 
