@@ -753,9 +753,9 @@ class PromptDefense:
         # Chunks aborted by stop_on_first_block went unreviewed; that only matters if the call is allowed.
         if not blocked and aborted_chunks > 0:
             depth_flag["coverage_degraded"] = True
-        # An unreadable payload (payload_error) wasn't scanned, so it raises no risk level; strict mode
-        # still blocks it through ``allowed``.
-        risk_level: RiskLevel = "high" if blocked else "low"
+        # An unreadable payload (payload_error) wasn't reviewed, so only what Tier 1 detected counts;
+        # strict mode still blocks it through ``allowed``.
+        risk_level: RiskLevel = "high" if blocked else tier1_risk if payload_error and detections else "low"
         allowed = not self._config.block_high_risk or (not blocked and not payload_error)
 
         meta: dict[str, Any] = {}
@@ -1148,7 +1148,7 @@ class PromptDefense:
             fields_sanitized=[],
             patterns_by_field={},
             detected_field_count=0,
-            tier2_skip_reason=reason,
+            tier2_skip_reason=redact_error_text(reason),
             coverage_degraded=True,
             latency_ms=(time.perf_counter() - start_time) * 1000,
         )
