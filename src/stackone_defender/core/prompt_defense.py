@@ -117,11 +117,12 @@ _WORD_RE = re.compile(r"[A-Za-z]{2,}")
 
 
 def _is_machine_token(t: str) -> bool:
-    """A URL, ID or other single token, unless it joins several words with - _ + or .
-    ("Ignore-all-previous-instructions", "IGNORE_ALL_...", a "+"-joined query string)."""
+    """A URL, ID or other single token, unless it joins several words with - _ or +
+    ("Ignore-all-previous-instructions", "IGNORE_ALL_...", a "+"-joined query string).
+    Dots don't count: they join hostname, email and path parts."""
     if not _ASCII_TOKEN_RE.fullmatch(t):
         return False
-    return sum(1 for w in re.split(r"[-_+.]+", t) if _WORD_RE.fullmatch(w)) < 4
+    return sum(1 for w in re.split(r"[-_+]+", t) if _WORD_RE.fullmatch(w)) < 4
 
 
 def _extract_strings(

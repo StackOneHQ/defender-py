@@ -254,6 +254,14 @@ class TestSfeFallback:
         result = defense.defend_tool_result({"notes": notes}, "test_tool")
         assert result.sfe_fallback is True
 
+    @pytest.mark.parametrize(
+        "url", ["api.example.company.co.uk", "john.doe.company.example", "https://api.example.company.co.uk/v1"]
+    )
+    def test_no_fallback_for_dotted_tokens(self, url):
+        defense = create_prompt_defense(enable_tier1=False, use_sfe={"predictor": _DropAll()})
+        result = defense.defend_tool_result({"url": url}, "test_tool")
+        assert result.sfe_fallback is None
+
     def test_no_fallback_for_url_and_id_tokens(self):
         defense = create_prompt_defense(enable_tier1=False, block_high_risk=True, use_sfe={"predictor": _DropAll()})
         result = defense.defend_tool_result(
