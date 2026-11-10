@@ -753,12 +753,13 @@ class PromptDefense:
         # Chunks aborted by stop_on_first_block went unreviewed; that only matters if the call is allowed.
         if not blocked and aborted_chunks > 0:
             depth_flag["coverage_degraded"] = True
-        risk_level: RiskLevel = "high" if blocked or payload_error else "low"
-        # block_high_risk=False always allows; strict mode fails closed on a payload error.
+        # An unreadable payload (payload_error) wasn't scanned, so it raises no risk level; strict mode
+        # still blocks it through ``allowed``.
+        risk_level: RiskLevel = "high" if blocked else "low"
         allowed = not self._config.block_high_risk or (not blocked and not payload_error)
 
         meta: dict[str, Any] = {}
-        if chunk_failures > 0:
+        if chunk_failures > 0 or payload_error:
             meta["errored"] = True
         if decided_by is not None:
             meta["decided_by"] = decided_by
@@ -889,7 +890,10 @@ class PromptDefense:
         boundary = generate_data_boundary() if self._annotate_boundary else None
 
         t_tier1_start = time.perf_counter()
-        sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name, boundary=boundary)
+        try:
+            sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name, boundary=boundary)
+        except Exception as e:
+            return self._build_unanalyzable_result(value, f"Tier 1 sanitize error: {describe_error(e)}", start_time)
         detections, tier1_flagged, prm = self._tier1_metadata(sanitized)
         tier1_ms = (time.perf_counter() - t_tier1_start) * 1000
 
@@ -1016,7 +1020,10 @@ class PromptDefense:
 
         # Tier 1: pattern-based sanitization on the original payload (matches TS 0.6.3).
         t_tier1_start = time.perf_counter()
-        sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name, boundary=boundary)
+        try:
+            sanitized = self._tool_sanitizer.sanitize(value, tool_name=tool_name, boundary=boundary)
+        except Exception as e:
+            return self._build_unanalyzable_result(value, f"Tier 1 sanitize error: {describe_error(e)}", start_time)
 
         # Collect Tier 1 metadata
         prm = sanitized.metadata.patterns_removed_by_field
@@ -1129,6 +1136,22 @@ class PromptDefense:
     # ``defend_tool_result`` orchestrates Tier 1 + Tier 2. The Tier 2 path
     # is split into five focused steps below to keep that orchestration
     # readable and to let each branch be unit-tested in isolation.
+
+    def _build_unanalyzable_result(self, value: Any, reason: str, start_time: float) -> DefenseResult:
+        """Result for a payload Tier 1 can't traverse. Nothing was scanned, so no risk level is
+        raised; strict mode still blocks it. Never let the exception escape."""
+        return DefenseResult(
+            allowed=not self._config.block_high_risk,
+            risk_level="low",
+            sanitized=value,
+            detections=[],
+            fields_sanitized=[],
+            patterns_by_field={},
+            detected_field_count=0,
+            tier2_skip_reason=reason,
+            coverage_degraded=True,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+        )
 
     def _evaluate_tier2(
         self,

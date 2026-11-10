@@ -61,6 +61,8 @@ class DefenseResult:
     # Operational signals
     tier2_available: bool | None = None       # False when Tier 2 enabled but failed to load
     coverage_degraded: bool | None = None      # True when Tier 1 detection or the Tier 3 review didn't cover everything
+    # An unreadable payload isn't scanned, so it raises no risk_level; strict mode still blocks it (allowed=False).
+    # In tier3_only, tier3.errored is also set.
     tier3_chunk_summary: Tier3ChunkSummary | None = None  # tier3_only: chunks, blocked, blocking_chunk, oversize
 ```
 

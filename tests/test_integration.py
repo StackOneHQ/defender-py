@@ -1,5 +1,6 @@
 """Integration tests for ToolResultSanitizer and PromptDefense."""
 
+import asyncio
 import base64 as _b64
 import os
 from unittest.mock import MagicMock, patch
@@ -795,3 +796,29 @@ class TestReviewRegressions:
         except RuntimeError:
             raised = True
         assert raised
+
+
+class _Exploding(dict):
+    def items(self):
+        raise RuntimeError("boom")
+
+
+class TestUnreadablePayload:
+    """ENG-4070: a payload Tier 1 can't traverse is unscanned, not high risk. Strict mode still blocks."""
+
+    @pytest.mark.parametrize("strict", [True, False], ids=["strict", "permissive"])
+    def test_sync(self, strict):
+        defense = create_prompt_defense(enable_tier2=False, block_high_risk=strict)
+        r = defense.defend_tool_result(_Exploding(a="b"), "docs_get")
+        assert r.allowed is not strict
+        assert r.risk_level == "low"
+        assert r.coverage_degraded is True
+        assert r.tier2_skip_reason == "Tier 1 sanitize error: boom"
+
+    @pytest.mark.parametrize("strict", [True, False], ids=["strict", "permissive"])
+    def test_async(self, strict):
+        defense = create_prompt_defense(enable_tier2=False, block_high_risk=strict)
+        r = asyncio.run(defense.defend_tool_result_async(_Exploding(a="b"), "docs_get"))
+        assert r.allowed is not strict
+        assert r.risk_level == "low"
+        assert r.coverage_degraded is True
