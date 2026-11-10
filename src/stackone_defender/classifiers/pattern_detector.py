@@ -10,7 +10,7 @@ import math
 import re
 import time
 
-from ..sanitizers.normalizer import join_line_split_words, normalize_for_detection
+from ..sanitizers.normalizer import join_line_split_words, normalize_for_detection, split_joined_word_pairs
 from ..types import PatternDefinition, PatternMatch, RiskLevel, StructuralFlag, Tier1Result
 from .patterns import ALL_PATTERNS, contains_filter_keywords
 
@@ -51,8 +51,8 @@ class PatternDetector:
         raw_text = text[: self._max_analysis_length] if len(text) > self._max_analysis_length else text
 
         # Collapse obfuscation before pattern matching (shared with Tier 2), plus
-        # words split across lines. Analysis-only.
-        analysis_text = join_line_split_words(normalize_for_detection(raw_text))
+        # words split across lines or joined in pairs. Analysis-only.
+        analysis_text = split_joined_word_pairs(join_line_split_words(normalize_for_detection(raw_text)))
 
         # Fast filter: short-circuit if neither raw nor normalised text
         # contains keywords. Raw text is checked to preserve detection of

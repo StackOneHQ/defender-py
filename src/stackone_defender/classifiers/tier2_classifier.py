@@ -109,6 +109,18 @@ def _coerce_float(value: Any) -> float | None:
     return None
 
 
+# 4+ repeats of the same non-word char (box-drawing ``─``, ``===``) tokenize one
+# token per char and score off-distribution, so they collapse to 3. (\w is
+# Unicode-aware in Python, so accented letters are kept.)
+_DECORATIVE_RUN = re.compile(r"([^\w\s])\1{3,}")
+
+
+def normalize_for_classification(text: str) -> str:
+    """Tier 2's input: boundary markers stripped, obfuscation undone with the
+    normaliser Tier 1 uses, decorative runs collapsed. Never returned to callers."""
+    return _DECORATIVE_RUN.sub(r"\1\1\1", normalize_for_detection(strip_boundary_patterns(normalize_unicode(text))))
+
+
 class Tier2Classifier:
     """Tier 2 Classifier using ONNX inference.
 
@@ -181,26 +193,11 @@ class Tier2Classifier:
     # Single-text classify
     # ------------------------------------------------------------------
 
-    # Collapse 4+ repeats of the same non-word char down to 3. Decorative runs
-    # (box-drawing ``─``, ``===``, ``---``, ``###``) tokenize one-token-per-char,
-    # so a rule line becomes ~85% one repeated token; under mean pooling the
-    # pooled vector lands off-distribution and the head returns an arbitrary
-    # (often high) score. Classifier input only — the returned payload is never
-    # modified. (\\w is Unicode-aware in Python, so accented letters are kept.)
-    _DECORATIVE_RUN = re.compile(r"([^\w\s])\1{3,}")
-
-    def _normalize_for_classification(self, text: str) -> str:
-        # Strip boundary markers, undo obfuscation with the normaliser Tier 1 uses,
-        # then collapse decorative runs. Classifier input only — payload never mutated.
-        return self._DECORATIVE_RUN.sub(
-            r"\1\1\1", normalize_for_detection(strip_boundary_patterns(normalize_unicode(text)))
-        )
-
     def classify(self, text: str) -> Tier2Result:
         start = time.perf_counter()
         # Strip defender's own boundary markers before tokenization so nested
         # tool-call chains and spoofed boundary patterns don't corrupt scores.
-        text = self._normalize_for_classification(text)
+        text = normalize_for_classification(text)
         if utf16_len(text) < self._min_text_length:
             return Tier2Result(
                 score=0,
@@ -249,7 +246,7 @@ class Tier2Classifier:
     def classify_by_sentence(self, text: str) -> dict[str, Any]:
         """Classify text by sentence and return max main score."""
         start = time.perf_counter()
-        text = self._normalize_for_classification(text)
+        text = normalize_for_classification(text)
         sentences = _split_into_sentences(text)
         if not sentences:
             return _skipped(start, "No sentences found")
@@ -293,7 +290,7 @@ class Tier2Classifier:
 
     def classify_by_chunks(self, text: str) -> dict[str, Any]:
         start = time.perf_counter()
-        text = self._normalize_for_classification(text)
+        text = normalize_for_classification(text)
         if utf16_len(text) < self._min_text_length:
             return _skipped(start, "Text below minTextLength")
 
@@ -357,7 +354,7 @@ class Tier2Classifier:
         }
 
     def prepare_chunks(self, text: str) -> dict[str, Any]:
-        text = self._normalize_for_classification(text)
+        text = normalize_for_classification(text)
         if utf16_len(text) < self._min_text_length:
             return {"chunks": [], "skipped": True, "skip_reason": "Text below minTextLength"}
 

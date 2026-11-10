@@ -187,9 +187,11 @@ INDIRECT_INJECTION_PATTERNS: list[PatternDefinition] = [
     PatternDefinition("html_comment_injection", re.compile(r"<!--\s*(?:system|ignore|instruction|prompt).*?-->", re.I), "structural", "high", "HTML comment containing injection keywords"),
     PatternDefinition("invisible_unicode", re.compile(r"[\u200b-\u200d\ufeff\u2060\u2061\u2062\u2063\u2064]"), "encoding_suspicious", "medium", "Invisible Unicode characters (zero-width, etc.)"),
     PatternDefinition("text_direction_override", re.compile(r"[\u202a-\u202e\u2066-\u2069]"), "encoding_suspicious", "medium", "Text direction override characters"),
-    # Hidden in a terminal or log viewer but read by the model.
-    PatternDefinition("ansi_escape_sequence", re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[@-_]"), "encoding_suspicious", "medium", "ANSI/terminal escape sequence"),
-    PatternDefinition("c0_control_character", re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]"), "encoding_suspicious", "low", "Non-whitespace C0 control character"),
+    # Hidden in a terminal or log viewer but read by the model. Obfuscation that uses it
+    # is caught on the normalised text. Low: coloured CLI output is common in tool results.
+    PatternDefinition("ansi_escape_sequence", re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x9b[0-9;?]*[A-Za-z]|\x1b[@-_]"), "encoding_suspicious", "low", "ANSI/terminal escape sequence"),
+    # ESC is left to ansi_escape_sequence.
+    PatternDefinition("c0_control_character", re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f]"), "encoding_suspicious", "low", "Non-whitespace C0 control character"),
     # confusable_homoglyphs: Cherokee (U+13A0-U+13F4) and Phonetic Extensions
     # (U+1D00-U+1D2B) are essentially never in real customer content, so
     # single-char presence remains a useful signal. Cyrillic (U+0400-U+04FF)
@@ -280,7 +282,7 @@ FAST_FILTER_KEYWORDS: list[str] = [
 
 
 # Lets the control-character patterns run with no keyword present.
-_CONTROL_CHAR_PROBE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_CONTROL_CHAR_PROBE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x9b]")
 
 
 def contains_filter_keywords(text: str) -> bool:

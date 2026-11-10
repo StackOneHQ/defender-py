@@ -69,6 +69,34 @@ def _apply_leet_map_chars(token: str) -> str:
     return "".join(out)
 
 
+# Short words attacks spell in leet with one letter left ("4n 4dm1n", "4r3", "7h3").
+# Other tokens with under 2 letters ("v1", "Q3") are IDs.
+_SHORT_WORDS = frozenset(
+    (  # noqa: SIM905
+        "am an as at be by do go if in is it me my no of on or so to up us we act all and any are can for get "
+        "has how its may new not now off our out own run set the use was who why you"
+    ).split()
+)
+_HEX_RE = re.compile(r"[0-9a-fA-F]+")
+_EDGE_DIGITS_RE = re.compile(r"^[0-9]+|[0-9]+$")
+
+
+def _is_identifier_like(token: str) -> bool:
+    """IDs, hashes and versions (``"user123"``, ``"d14f0615"``, ``"v2"``).
+
+    Under 2 letters (unless a short word), hex with a digit, or at either end
+    4+ digits or 2+ with a 2, 6 or 9 (``"COVID19"``, ``"user123"``, not
+    ``"rul35"`` or ``"573al"``). Leet in them would only produce noise.
+    """
+    if len(_HAS_LETTER_RE.findall(token)) < 2:
+        return _apply_leet_map_chars(token).lower() not in _SHORT_WORDS
+    if len(token) >= 6 and _HEX_RE.fullmatch(token) and any(c.isdigit() for c in token):
+        return True
+    return any(
+        (len(run) >= 2 and _NON_LEET_DIGIT_RE.search(run)) or len(run) >= 4 for run in _EDGE_DIGITS_RE.findall(token)
+    )
+
+
 def _apply_leet_map_token_aware(text: str) -> str:
     """Token-aware leet substitution.
 
@@ -83,11 +111,11 @@ def _apply_leet_map_token_aware(text: str) -> str:
 
     def _repl(match: re.Match[str]) -> str:
         token = match.group(0)
-        # Only words with 2+ letters whose digits are all leet digits: leaves IDs,
-        # hashes and versions ("user123", "d14f0615", "v2") alone.
-        if len(_HAS_LETTER_RE.findall(token)) < 2 or _NON_LEET_DIGIT_RE.search(token):
+        if not _HAS_LETTER_RE.search(token) or _is_identifier_like(token):
             return token
-        return _apply_leet_map_chars(token)
+        mapped = _apply_leet_map_chars(token)
+        # Digits left in a leet word are padding ("d1sreg4rd2").
+        return token if mapped == token else _NON_LEET_DIGIT_RE.sub("", mapped)
 
     return _TOKEN_RE.sub(_repl, text)
 

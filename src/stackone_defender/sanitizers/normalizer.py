@@ -61,6 +61,7 @@ def strip_combining_marks(text: str) -> str:
 # ASCII \b, as in JavaScript.
 _LETTER_SPACING_RE = re.compile(r"\b(?:[a-zA-Z] ){2,}[a-zA-Z]\b", re.ASCII)
 _EMBEDDED_NEWLINE_RE = re.compile(r"([a-zA-Z])[\r\n]+([a-zA-Z])")
+_JOINED_PAIR_RE = re.compile(r"([A-Za-z])[-_.]+(?=[A-Za-z])")
 
 
 def normalize_whitespace(text: str) -> str:
@@ -87,6 +88,17 @@ def collapse_spaced_letters(text: str) -> str:
     return _LETTER_SPACING_RE.sub(lambda m: m.group(0).replace(" ", ""), text)
 
 
+def split_joined_word_pairs(text: str) -> str:
+    """Split two words joined by ``- _ .`` (``"ignore-previous"``, ``"ignore__all"``).
+
+    Tier 1 only: its patterns are specific, but Tier 2 would read every
+    compound and hostname apart.
+    """
+    if not text:
+        return text
+    return _JOINED_PAIR_RE.sub(r"\1 ", text)
+
+
 def join_line_split_words(text: str) -> str:
     """Remove line breaks between adjacent letters (``"ign\\nore"`` -> ``"ignore"``).
 
@@ -101,9 +113,6 @@ def join_line_split_words(text: str) -> str:
 _REPLACEMENTS: list[tuple[re.Pattern, str]] = [
     # Zero-width characters
     (re.compile(r"[\u200b-\u200d\ufeff]"), ""),
-    # ANSI escapes and C0 control characters (not tab, LF, CR). A space, not "":
-    # they are spliced in place of spaces ("ignore<ESC>all") to break \s+ patterns.
-    (re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f]"), " "),
     # Cyrillic homoglyphs
     (re.compile(r"[\u0430]"), "a"),
     (re.compile(r"[\u0435]"), "e"),
@@ -147,20 +156,26 @@ _WORD_RE = re.compile(r"[^\W_]+")
 _HAS_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 
 
+def _is_native(s: str) -> bool:
+    return any(c not in _CONFUSABLE_SET for c in _GREEK_CYRILLIC_RE.findall(s))
+
+
 def fold_confusables(text: str) -> str:
     """Fold Greek/Cyrillic look-alikes to Latin.
 
-    Only inside words that also hold a Latin letter, or anywhere when the text
-    has no Greek/Cyrillic letter without a Latin look-alike, so real Greek or
-    Russian text is left alone.
+    In words that hold a Latin letter or only look-alikes. Words with any other
+    Greek/Cyrillic letter are real Greek or Russian and are left alone, as are
+    one-letter words (Greek omicron) in Greek or Russian text.
     """
     if not text or not _CONFUSABLE_RE.search(text):
         return text
-    native_script = any(c not in _CONFUSABLE_SET for c in _GREEK_CYRILLIC_RE.findall(text))
+    native_text = _is_native(text)
 
     def _fold(m: re.Match[str]) -> str:
         word = m.group(0)
-        if not _CONFUSABLE_RE.search(word) or (native_script and not _HAS_ASCII_LETTER_RE.search(word)):
+        if not _CONFUSABLE_RE.search(word) or _HAS_ASCII_LETTER_RE.search(word):
+            return word.translate(_CONFUSABLES)
+        if _is_native(word) or (native_text and len(word) < 2):
             return word
         return word.translate(_CONFUSABLES)
 
@@ -176,15 +191,20 @@ _PUNCT_SEPARATOR_RE = re.compile(r"[._-]")
 def _join_spaced_chars(m: re.Match[str]) -> str:
     """Join a run of spaced-out characters when 3+ are letters.
 
-    With one punctuation mark (``"I.g.n.o.r.e a.l.l"``) spaces are word breaks;
-    with several mixed (``"i.g n-o r.e"``) they are part of the scrambling.
+    When each space-separated part has 3+ letters joined by one punctuation mark
+    (``"I.g.n.o.r.e a-l-l"``) spaces are word breaks; otherwise
+    (``"i.g n-o r.e"``) they are part of the scrambling.
     """
     run = m.group(0)
     if not _THREE_LETTERS_RE.search(run):
         return run
-    if len(set(_PUNCT_SEPARATOR_RE.findall(run))) > 1:
+    words = run.split(" ")
+    scrambled = any(
+        len(_HAS_ASCII_LETTER_RE.findall(w)) < 3 or len(set(_PUNCT_SEPARATOR_RE.findall(w))) > 1 for w in words
+    )
+    if scrambled:
         return re.sub(r"[ ._-]", "", run)
-    return " ".join(_PUNCT_SEPARATOR_RE.sub("", w) for w in run.split(" "))
+    return " ".join(_PUNCT_SEPARATOR_RE.sub("", w) for w in words)
 _JOINED_WORDS_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]+(?:[-_./,][A-Za-z0-9]+){2,}(?![A-Za-z0-9])")
 _WORD_SEPARATOR_RE = re.compile(r"[-_./,]")
 
@@ -210,6 +230,16 @@ def normalize_word_separators(text: str) -> str:
     return _JOINED_WORDS_RE.sub(_split_joined_words, _SPACED_CHARS_RE.sub(_join_spaced_chars, text))
 
 
+# ANSI escapes (7- and 8-bit) and C0/C1 control characters (not tab, LF, CR, NEL).
+# A space, not "": they are spliced in place of spaces ("ignore<ESC>all") to break \s+ patterns.
+_CONTROL_RE = re.compile(
+    r"\x1b\[[0-9;?]*[A-Za-z]|\x9b[0-9;?]*[A-Za-z]|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f]"
+)
+# Invisible format characters normalize_unicode keeps: soft hyphen, Mongolian vowel
+# separator, LRM/RLM, word joiner and invisible operators, variation selectors.
+_INVISIBLE_RE = re.compile(r"[\u00ad\u180e\u200e\u200f\u2060-\u2064\ufe00-\ufe0f]")
+
+
 def normalize_for_detection(text: str) -> str:
     """The analysis copy both tiers scan. Never returned to callers.
 
@@ -218,6 +248,7 @@ def normalize_for_detection(text: str) -> str:
     """
     if not text:
         return text
+    text = _INVISIBLE_RE.sub("", _CONTROL_RE.sub(" ", text))
     return normalize_leet_speak(
         collapse_spaced_letters(
             normalize_word_separators(
