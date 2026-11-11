@@ -17,7 +17,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from .leet_normalizer import normalize_leet_speak
+from .leet_normalizer import LeetGate, normalize_leet_speak
 
 
 def normalize_unicode(text: str) -> str:
@@ -231,26 +231,35 @@ _INVISIBLE_RE = re.compile(r"[\u00ad\u180e\u200e\u200f\u2060-\u2064\ufe00-\ufe0f
 _ALL_INVISIBLE_RE = re.compile(r"[\u00ad\u180e\u200b-\u200f\u2060-\u2064\ufeff\ufe00-\ufe0f]")
 
 
-def normalize_for_detection(text: str, *, alternate: bool = False) -> str:
+# URLs and emails, which separator splitting would turn into prose.
+_LINK_RE = re.compile(
+    r"((?:[A-Za-z][A-Za-z0-9+.-]*://|www\.)[^\s\"'<>]+|[A-Za-z0-9_.+-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)"
+)
+
+
+def normalize_for_detection(
+    text: str, *, alternate: bool = False, keep_links: bool = False, leet_gate: LeetGate | None = None
+) -> str:
     """The analysis copy both tiers scan. Never returned to callers.
 
     Undoes control characters, combining marks, unicode variants, look-alikes,
     joined words, spaced letters and leet. ``alternate`` gives the other reading
     of ambiguous text, for Tier 1: invisible characters as spaces rather than
-    removed, and leet reversed in ID-like tokens too.
+    removed, and leet reversed in ID-like tokens too. ``keep_links`` leaves URLs
+    and emails out of separator splitting. ``leet_gate`` decides which leet
+    tokens are decoded.
     """
     if not text:
         return text
     text = _CONTROL_RE.sub(" ", text)
     text = _ALL_INVISIBLE_RE.sub(" ", text) if alternate else _INVISIBLE_RE.sub("", text)
-    return normalize_leet_speak(
-        collapse_spaced_letters(
-            normalize_word_separators(
-                fold_confusables(normalize_unicode(strip_combining_marks(unicodedata.normalize("NFD", text))))
-            )
-        ),
-        protect_ids=not alternate,
-    )
+    text = fold_confusables(normalize_unicode(strip_combining_marks(unicodedata.normalize("NFD", text))))
+    if keep_links:
+        parts = _LINK_RE.split(text)
+        text = "".join(p if i % 2 else normalize_word_separators(p) for i, p in enumerate(parts))
+    else:
+        text = normalize_word_separators(text)
+    return normalize_leet_speak(collapse_spaced_letters(text), protect_ids=not alternate, gate=leet_gate)
 
 
 def contains_suspicious_unicode(text: str) -> bool:

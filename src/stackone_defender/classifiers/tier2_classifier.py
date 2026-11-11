@@ -115,10 +115,61 @@ def _coerce_float(value: Any) -> float | None:
 _DECORATIVE_RUN = re.compile(r"([^\w\s])\1{3,}")
 
 
-def normalize_for_classification(text: str) -> str:
-    """Tier 2's input: boundary markers stripped, obfuscation undone with the
-    normaliser Tier 1 uses, decorative runs collapsed. Never returned to callers."""
-    return _DECORATIVE_RUN.sub(r"\1\1\1", normalize_for_detection(strip_boundary_patterns(normalize_unicode(text))))
+_vocab_cache: dict[str, frozenset[str]] = {}
+_PUNCT_SPLIT = re.compile(r"([^a-z0-9])")
+
+
+def _wordpiece_vocab(model_dir: str) -> frozenset[str]:
+    vocab = _vocab_cache.get(model_dir)
+    if vocab is None:
+        with open(os.path.join(model_dir, "tokenizer.json"), encoding="utf-8") as f:
+            vocab = frozenset(json.load(f)["model"]["vocab"])
+        _vocab_cache[model_dir] = vocab
+    return vocab
+
+
+def count_word_pieces(word: str, vocab: frozenset[str]) -> int:
+    """How many WordPiece tokens the model's tokenizer splits a word into: lowercased,
+    punctuation split off, greedy longest match. A word it can't split (or over 100
+    chars) is one unknown token."""
+    count = 0
+    for part in _PUNCT_SPLIT.split(word.lower()):
+        if not part:
+            continue
+        if len(part) > 100:
+            count += 1
+            continue
+        pieces = 0
+        i = 0
+        while i < len(part):
+            j = len(part)
+            while j > i and (part[:j] if i == 0 else "##" + part[i:j]) not in vocab:
+                j -= 1
+            if j == i:
+                pieces = 1
+                break
+            i = j
+            pieces += 1
+        count += pieces
+    return count
+
+
+def normalize_for_classification(text: str, model_dir: str | None = None) -> str:
+    """Tier 2's input: boundary markers stripped, obfuscation undone, decorative
+    runs collapsed. Never returned to callers.
+
+    Unlike Tier 1's copy, URLs and emails keep their separators, and a leet token is
+    decoded only when the model reads it in at most half the tokens ("1gn0r3" ->
+    "ignore", while "8a1c" stays): decoded IDs and split-up URLs read as words the
+    model never saw there.
+    """
+    vocab = _wordpiece_vocab(model_dir or get_default_model_path())
+    normalised = normalize_for_detection(
+        strip_boundary_patterns(normalize_unicode(text)),
+        keep_links=True,
+        leet_gate=lambda token, decoded: 2 * count_word_pieces(decoded, vocab) <= count_word_pieces(token, vocab),
+    )
+    return _DECORATIVE_RUN.sub(r"\1\1\1", normalised)
 
 
 class Tier2Classifier:
@@ -197,7 +248,7 @@ class Tier2Classifier:
         start = time.perf_counter()
         # Strip defender's own boundary markers before tokenization so nested
         # tool-call chains and spoofed boundary patterns don't corrupt scores.
-        text = normalize_for_classification(text)
+        text = normalize_for_classification(text, self._model_path)
         if utf16_len(text) < self._min_text_length:
             return Tier2Result(
                 score=0,
@@ -246,7 +297,7 @@ class Tier2Classifier:
     def classify_by_sentence(self, text: str) -> dict[str, Any]:
         """Classify text by sentence and return max main score."""
         start = time.perf_counter()
-        text = normalize_for_classification(text)
+        text = normalize_for_classification(text, self._model_path)
         sentences = _split_into_sentences(text)
         if not sentences:
             return _skipped(start, "No sentences found")
@@ -290,7 +341,7 @@ class Tier2Classifier:
 
     def classify_by_chunks(self, text: str) -> dict[str, Any]:
         start = time.perf_counter()
-        text = normalize_for_classification(text)
+        text = normalize_for_classification(text, self._model_path)
         if utf16_len(text) < self._min_text_length:
             return _skipped(start, "Text below minTextLength")
 
@@ -354,7 +405,7 @@ class Tier2Classifier:
         }
 
     def prepare_chunks(self, text: str) -> dict[str, Any]:
-        text = normalize_for_classification(text)
+        text = normalize_for_classification(text, self._model_path)
         if utf16_len(text) < self._min_text_length:
             return {"chunks": [], "skipped": True, "skip_reason": "Text below minTextLength"}
 

@@ -11,6 +11,7 @@ lossy on legitimate content.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 #: Leet-speak substitution map. Each entry maps a character to its most
 #: common alphabetic equivalent.
@@ -103,7 +104,11 @@ def _is_identifier_like(token: str) -> bool:
     return len(run) >= 4 or (len(run) >= 2 and bool(_NON_LEET_DIGIT_RE.search(run)) and not _LEET_CHAR_RE.search(rest))
 
 
-def _apply_leet_map_token_aware(text: str, protect_ids: bool) -> str:
+LeetGate = Callable[[str, str], bool]
+"""Decides whether a leet token is replaced by its decoded form: ``gate(token, decoded)``."""
+
+
+def _apply_leet_map_token_aware(text: str, protect_ids: bool, gate: LeetGate | None = None) -> str:
     """Token-aware leet substitution.
 
     Splits text into alphanumeric tokens (``[@a-zA-Z0-9!$]+``) and
@@ -120,13 +125,16 @@ def _apply_leet_map_token_aware(text: str, protect_ids: bool) -> str:
         if not _HAS_LETTER_RE.search(token) or (protect_ids and _is_identifier_like(token)):
             return token
         mapped = _apply_leet_map_chars(token)
+        if mapped == token:
+            return token
         # Digits left in a leet word are padding ("d1sreg4rd2").
-        return token if mapped == token else _NON_LEET_DIGIT_RE.sub("", mapped)
+        decoded = _NON_LEET_DIGIT_RE.sub("", mapped)
+        return token if gate is not None and not gate(token, decoded) else decoded
 
     return _TOKEN_RE.sub(_repl, text)
 
 
-def normalize_leet_speak(text: str, protect_ids: bool = True) -> str:
+def normalize_leet_speak(text: str, protect_ids: bool = True, gate: LeetGate | None = None) -> str:
     """Normalize leet-speak substitutions in text.
 
     Converts digit and symbol substitutions back to their alphabetic
@@ -137,7 +145,8 @@ def normalize_leet_speak(text: str, protect_ids: bool = True) -> str:
     shell substitution syntax ``$(`` are left untouched to avoid corrupting
     encoding-detection patterns.
 
-    Pure-digit tokens (``"100"``, ``"2024"``) are left unchanged.
+    Pure-digit tokens (``"100"``, ``"2024"``) are left unchanged. When ``gate``
+    is given, a token is decoded only when ``gate(token, decoded)`` is true.
     """
     if not text:
         return text
@@ -145,8 +154,8 @@ def normalize_leet_speak(text: str, protect_ids: bool = True) -> str:
     segments: list[str] = []
     last_index = 0
     for match in PROTECTED_SEQUENCE.finditer(text):
-        segments.append(_apply_leet_map_token_aware(text[last_index : match.start()], protect_ids))
+        segments.append(_apply_leet_map_token_aware(text[last_index : match.start()], protect_ids, gate))
         segments.append(match.group(0))
         last_index = match.end()
-    segments.append(_apply_leet_map_token_aware(text[last_index:], protect_ids))
+    segments.append(_apply_leet_map_token_aware(text[last_index:], protect_ids, gate))
     return "".join(segments)

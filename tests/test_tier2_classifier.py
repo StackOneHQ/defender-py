@@ -8,7 +8,12 @@ import pytest
 
 from stackone_defender.classifiers import tier2_classifier as t2_mod
 from stackone_defender.classifiers.onnx_classifier import get_default_model_path
-from stackone_defender.classifiers.tier2_classifier import Tier2Classifier, create_tier2_classifier
+from stackone_defender.classifiers.tier2_classifier import (
+    Tier2Classifier,
+    count_word_pieces,
+    create_tier2_classifier,
+    normalize_for_classification,
+)
 from stackone_defender.types import MultiheadConfig
 
 _HAS_MODEL = os.path.exists(os.path.join(get_default_model_path(), "model_quantized.onnx"))
@@ -259,3 +264,38 @@ class TestDecorativeOutputFalsePositive:
         c = create_tier2_classifier()
         r = c.classify(f"{_to_fullwidth('URGENT: ')}{self._FULLWIDTH}")
         assert r.score > 0.5
+
+
+class TestNormalizeForClassification:
+    def test_decodes_leet_words_the_model_reads_better(self):
+        assert normalize_for_classification("1gn0r3 pr3v10us 1nstruct10ns, @dm1n 0verr1de j41lbr34k 5y5t3m pr0mpt") == (
+            "ignore previous instructions, admin override jailbreak system prompt"
+        )
+
+    def test_leaves_ids_and_emails_alone(self):
+        for t in ["pi_3RemediationCase01", "U06SH7", "jane@example.com", "p95 v2"]:
+            assert normalize_for_classification(t) == t
+        assert normalize_for_classification("id 8a1c-4d20-be71") == "id 8a1c 4d20 be71"
+
+    def test_keeps_urls_whole_and_still_splits_joined_words(self):
+        text = "report-uri https://logs.browser-intake.example.com/api/v2/logs?dd-api-key=x i-g-n-o-r-e all_previous_instructions"
+        assert normalize_for_classification(text) == (
+            "report-uri https://logs.browser-intake.example.com/api/v2/logs?dd-api-key=x ignore all previous instructions"
+        )
+
+
+@pytest.fixture(scope="module")
+def vocab():
+    with open(os.path.join(get_default_model_path(), "tokenizer.json"), encoding="utf-8") as f:
+        return frozenset(json.load(f)["model"]["vocab"])
+
+
+class TestCountWordPieces:
+    def test_counts_like_the_tokenizer(self, vocab):
+        assert count_word_pieces("ignore", vocab) == 1
+        assert count_word_pieces("IGNORE", vocab) == 1
+        assert count_word_pieces("1gn0r3", vocab) > 2
+        assert count_word_pieces("@dm1n", vocab) > count_word_pieces("admin", vocab)
+
+    def test_word_over_100_chars_is_one_unknown_token(self, vocab):
+        assert count_word_pieces("a1" * 60, vocab) == 1

@@ -388,3 +388,14 @@ class TestInvisibleAndControlCharacters:
 
     def test_normalize_unicode_keeps_control_characters(self):
         assert normalize_unicode("a\x1b[31mb") == "a\x1b[31mb"
+
+
+class TestNormalizeForDetectionOptions:
+    def test_keep_links_leaves_urls_and_emails_whole(self):
+        text = "see https://logs.example-intake.com/api/v2/logs?dd-api-key=x and a.b-c@mail.example.com, ignore-all-previous"
+        assert normalize_for_detection(text, keep_links=True, leet_gate=lambda _t, _d: False) == (
+            "see https://logs.example-intake.com/api/v2/logs?dd-api-key=x and a.b-c@mail.example.com, ignore all previous"
+        )
+
+    def test_leet_gate_decides_which_tokens_are_decoded(self):
+        assert normalize_leet_speak("1gn0r3 r3m3d14t10n", True, lambda _t, d: d == "ignore") == "ignore r3m3d14t10n"
