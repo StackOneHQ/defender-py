@@ -147,7 +147,6 @@ class _Field:
     parent: Any
     key: Any
     value_type: str
-    value_truncated: str
     depth: int
 
 
@@ -192,10 +191,7 @@ def _extract_fields(
         for i, item in enumerate(obj):
             out.extend(_extract_fields(item, depth_flag, path, depth, stack_depth + 1, obj, i))
     else:
-        val = "" if obj is None else _js_head(str(obj), 500)
-        out.append(
-            _Field(raw_path=path, parent=parent, key=key, value_type=_value_type(obj), value_truncated=val, depth=depth)
-        )
+        out.append(_Field(raw_path=path, parent=parent, key=key, value_type=_value_type(obj), depth=depth))
     return out
 
 
@@ -206,15 +202,14 @@ def _cap_path(path: str) -> str:
     return from_utf16(to_utf16(path)[-_MAX_PATH_CHARS:])
 
 
-def _js_head(s: str, n: int) -> str:
-    """JS `s.slice(0, n)`: the first n UTF-16 units."""
-    return from_utf16(to_utf16(s[:n])[:n])
-
-
 def _field_to_text(field: _Field) -> str:
+    """The text the FastText model was trained on: `to_text()` in solaris-labels/modal_train_path_model.py.
+
+    The value is left out on purpose: whether a field is writable belongs to the field, and an
+    attacker controls the value, so reading it let them make a writable field look like system data.
+    """
     path_tokens = field.raw_path.replace(".", " ").replace("_", " ").replace("-", " ")
-    val = _js_head(field.value_truncated, 200)
-    text = f"{field.value_type} d{field.depth} {path_tokens} {val}"
+    text = f"{field.value_type} d{field.depth} {path_tokens}"
     # from_utf16 turns lone surrogates into U+FFFD; the FastText binding raises on them.
     return from_utf16(text.replace("\r", " ").replace("\n", " "))
 
