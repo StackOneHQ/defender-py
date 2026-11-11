@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -119,7 +120,7 @@ def sfe_preprocess(value: Any, options: dict[str, Any] | None = None) -> SfePrep
         else:
             label = str(getattr(decision, "label", "pass"))
             prob = float(getattr(decision, "prob", 0.0))
-        target = drops if label == "drop" and prob >= threshold else keeps
+        target = drops if label == "drop" and prob >= threshold and not _is_prose(candidate.value) else keeps
         target.setdefault(id(candidate.parent), set()).add(candidate.key)
     # An object reachable from two paths is one leaf: drop it only if no path kept it.
     for parent_id, keys in keeps.items():
@@ -146,6 +147,7 @@ class _Field:
     # The leaf's container and key. A drop removes this leaf only, not its siblings in other elements.
     parent: Any
     key: Any
+    value: Any
     value_type: str
     depth: int
 
@@ -191,7 +193,7 @@ def _extract_fields(
         for i, item in enumerate(obj):
             out.extend(_extract_fields(item, depth_flag, path, depth, stack_depth + 1, obj, i))
     else:
-        out.append(_Field(raw_path=path, parent=parent, key=key, value_type=_value_type(obj), depth=depth))
+        out.append(_Field(raw_path=path, parent=parent, key=key, value=obj, value_type=_value_type(obj), depth=depth))
     return out
 
 
@@ -200,6 +202,18 @@ def _cap_path(path: str) -> str:
     if utf16_len(path) <= _MAX_PATH_CHARS:
         return path
     return from_utf16(to_utf16(path)[-_MAX_PATH_CHARS:])
+
+
+# JS `\s`, so a value reads as words in both ports alike.
+_JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_PROSE_RE = re.compile(f"[^{_JS_SPACE}]+[{_JS_SPACE}]+[^{_JS_SPACE}]+[{_JS_SPACE}]+[^{_JS_SPACE}]")
+
+
+def _is_prose(value: Any) -> bool:
+    """The model never sees values, so they can't hide a field. They can only keep one: a
+    dropped field whose value reads as words (an attacker writing into an `external_id`) is
+    still scored."""
+    return isinstance(value, str) and _PROSE_RE.search(value) is not None
 
 
 def _field_to_text(field: _Field) -> str:
