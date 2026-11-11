@@ -284,6 +284,12 @@ class TestNormalizeForClassification:
         )
 
 
+def test_normalize_for_classification_without_wordpiece_tokenizer_decodes_leet(tmp_path):
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"model": {"type": "Unigram", "vocab": [["a", 0]]}}))
+    assert normalize_for_classification("1gn0r3 r3m3d14t10n", str(tmp_path)) == "ignore remediation"
+    assert normalize_for_classification("1gn0r3", str(tmp_path / "missing")) == "ignore"
+
+
 @pytest.fixture(scope="module")
 def vocab():
     with open(os.path.join(get_default_model_path(), "tokenizer.json"), encoding="utf-8") as f:

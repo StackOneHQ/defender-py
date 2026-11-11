@@ -115,17 +115,24 @@ def _coerce_float(value: Any) -> float | None:
 _DECORATIVE_RUN = re.compile(r"([^\w\s])\1{3,}")
 
 
-_vocab_cache: dict[str, frozenset[str]] = {}
+_vocab_cache: dict[str, frozenset[str] | None] = {}
 _PUNCT_SPLIT = re.compile(r"([^a-z0-9])")
 
 
-def _wordpiece_vocab(model_dir: str) -> frozenset[str]:
-    vocab = _vocab_cache.get(model_dir)
-    if vocab is None:
-        with open(os.path.join(model_dir, "tokenizer.json"), encoding="utf-8") as f:
-            vocab = frozenset(json.load(f)["model"]["vocab"])
+def _wordpiece_vocab(model_dir: str) -> frozenset[str] | None:
+    """The model's WordPiece vocabulary, read from its ``tokenizer.json`` once. ``None`` when the
+    model has no WordPiece tokenizer: the leet gate then can't count tokens and is skipped."""
+    if model_dir not in _vocab_cache:
+        vocab = None
+        try:
+            with open(os.path.join(model_dir, "tokenizer.json"), encoding="utf-8") as f:
+                model = json.load(f).get("model") or {}
+            if model.get("type") == "WordPiece":
+                vocab = frozenset(model["vocab"])
+        except (OSError, ValueError, AttributeError):
+            pass  # No readable tokenizer.json: decode leet as Tier 1 does.
         _vocab_cache[model_dir] = vocab
-    return vocab
+    return _vocab_cache[model_dir]
 
 
 def count_word_pieces(word: str, vocab: frozenset[str]) -> int:
@@ -161,13 +168,14 @@ def normalize_for_classification(text: str, model_dir: str | None = None) -> str
     Unlike Tier 1's copy, URLs and emails keep their separators, and a leet token is
     decoded only when the model reads it in at most half the tokens ("1gn0r3" ->
     "ignore", while "8a1c" stays): decoded IDs and split-up URLs read as words the
-    model never saw there.
+    model never saw there. A model without a WordPiece tokenizer gets every leet token decoded.
     """
     vocab = _wordpiece_vocab(model_dir or get_default_model_path())
+    gate = None
+    if vocab is not None:
+        gate = lambda token, decoded: 2 * count_word_pieces(decoded, vocab) <= count_word_pieces(token, vocab)  # noqa: E731
     normalised = normalize_for_detection(
-        strip_boundary_patterns(normalize_unicode(text)),
-        keep_links=True,
-        leet_gate=lambda token, decoded: 2 * count_word_pieces(decoded, vocab) <= count_word_pieces(token, vocab),
+        strip_boundary_patterns(normalize_unicode(text)), keep_links=True, leet_gate=gate
     )
     return _DECORATIVE_RUN.sub(r"\1\1\1", normalised)
 
