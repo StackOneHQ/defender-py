@@ -290,6 +290,16 @@ def test_normalize_for_classification_without_wordpiece_tokenizer_decodes_leet(t
     assert normalize_for_classification("1gn0r3", str(tmp_path / "missing")) == "ignore"
 
 
+def test_skips_the_gate_for_a_wordpiece_tokenizer_that_is_not_bert_style(tmp_path):
+    tokenizer = {
+        "model": {"type": "WordPiece", "continuing_subword_prefix": "@@", "vocab": {"remediation": 0}},
+        "normalizer": {"type": "BertNormalizer", "lowercase": True},
+        "pre_tokenizer": {"type": "BertPreTokenizer"},
+    }
+    (tmp_path / "tokenizer.json").write_text(json.dumps(tokenizer))
+    assert normalize_for_classification("U06SH7", str(tmp_path)) == "UoSHt"
+
+
 def test_classifier_normalises_with_its_own_model(tmp_path):
     (tmp_path / "tokenizer.json").write_text(json.dumps({"model": {"type": "Unigram", "vocab": [["a", 0]]}}))
     assert Tier2Classifier(config={"onnx_model_path": str(tmp_path)}).normalize("U06SH7") == "UoSHt"

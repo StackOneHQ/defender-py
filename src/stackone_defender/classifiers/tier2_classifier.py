@@ -120,14 +120,25 @@ _PUNCT_SPLIT = re.compile(r"([^a-z0-9])")
 
 
 def _wordpiece_vocab(model_dir: str) -> frozenset[str] | None:
-    """The model's WordPiece vocabulary, read from its ``tokenizer.json`` once. ``None`` when the
-    model has no WordPiece tokenizer: the leet gate then can't count tokens and is skipped."""
+    """The model's WordPiece vocabulary, read from its ``tokenizer.json`` once. ``None`` unless the
+    tokenizer is BERT-style WordPiece, the one ``count_word_pieces`` mirrors: the leet gate is then
+    skipped."""
     if model_dir not in _vocab_cache:
         vocab = None
         try:
             with open(os.path.join(model_dir, "tokenizer.json"), encoding="utf-8") as f:
-                model = json.load(f).get("model") or {}
-            if model.get("type") == "WordPiece":
+                doc = json.load(f)
+            model = doc.get("model") or {}
+            normalizer = doc.get("normalizer") or {}
+            bert = (
+                model.get("type") == "WordPiece"
+                and model.get("continuing_subword_prefix", "##") == "##"
+                and model.get("max_input_chars_per_word", 100) == 100
+                and normalizer.get("type") == "BertNormalizer"
+                and normalizer.get("lowercase") is True
+                and (doc.get("pre_tokenizer") or {}).get("type") == "BertPreTokenizer"
+            )
+            if bert:
                 vocab = frozenset(model["vocab"])
         except (OSError, ValueError, AttributeError):
             pass  # No readable tokenizer.json: decode leet as Tier 1 does.
