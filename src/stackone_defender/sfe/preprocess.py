@@ -11,7 +11,7 @@ from typing import Any, Protocol
 
 from ..config import DANGEROUS_KEYS, MAX_TRAVERSAL_DEPTH
 from ..utils.lfs import assert_not_lfs_pointer
-from ..utils.text import from_utf16, to_utf16, utf16_len
+from ..utils.text import from_utf16, js_trim, to_utf16, utf16_len
 
 _logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ def sfe_preprocess(value: Any, options: dict[str, Any] | None = None) -> SfePrep
         else:
             label = str(getattr(decision, "label", "pass"))
             prob = float(getattr(decision, "prob", 0.0))
-        target = drops if label == "drop" and prob >= threshold and not _is_prose(candidate.value) else keeps
+        target = drops if label == "drop" and prob >= threshold and _can_drop(candidate.value) else keeps
         target.setdefault(id(candidate.parent), set()).add(candidate.key)
     # An object reachable from two paths is one leaf: drop it only if no path kept it.
     for parent_id, keys in keeps.items():
@@ -204,16 +204,24 @@ def _cap_path(path: str) -> str:
     return from_utf16(to_utf16(path)[-_MAX_PATH_CHARS:])
 
 
-# JS `\s`, so a value reads as words in both ports alike.
-_JS_SPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-_PROSE_RE = re.compile(f"[^{_JS_SPACE}]+[{_JS_SPACE}]+[^{_JS_SPACE}]+[{_JS_SPACE}]+[^{_JS_SPACE}]")
+# One printable-ASCII token with no whitespace: a URL, ID or token, not prose.
+_ASCII_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
+_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 
 
-def _is_prose(value: Any) -> bool:
-    """The model never sees values, so they can't hide a field. They can only keep one: a
-    dropped field whose value reads as words (an attacker writing into an `external_id`) is
-    still scored."""
-    return isinstance(value, str) and _PROSE_RE.search(value) is not None
+def _can_drop(value: Any) -> bool:
+    """The model never sees values, so they can't hide a field. A dropped field stays dropped
+    only when its value can't carry an instruction: empty, or one URL, ID or other machine
+    token. A token that joins 4+ words with - _ or + ("Ignore-all-previous-instructions") is
+    kept. Dots don't count: they join hostname, email and path parts."""
+    if not isinstance(value, str):
+        return True
+    t = js_trim(value)
+    if not t:
+        return True
+    if not _ASCII_TOKEN_RE.fullmatch(t):
+        return False
+    return sum(1 for w in re.split(r"[-_+]+", t) if _WORD_RE.fullmatch(w)) < 4
 
 
 def _field_to_text(field: _Field) -> str:
