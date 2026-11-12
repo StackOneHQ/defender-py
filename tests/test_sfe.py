@@ -1,5 +1,7 @@
 """Tests for SFE preprocessing and PromptDefense integration."""
 
+import time
+
 import pytest
 
 from stackone_defender import create_prompt_defense
@@ -226,6 +228,12 @@ def test_sfe_may_drop(value):
 )
 def test_sfe_keeps(value):
     assert _dropped(value) == []
+
+
+def test_floor_stays_fast_on_a_10m_character_joined_token():
+    start = time.perf_counter()
+    assert _dropped("a-" * 5_000_000) == ["v"]
+    assert time.perf_counter() - start < 1
 
 
 @pytest.mark.model

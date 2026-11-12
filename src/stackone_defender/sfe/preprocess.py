@@ -194,7 +194,7 @@ def _extract_fields(
         for i, item in enumerate(obj):
             out.extend(_extract_fields(item, depth_flag, path, depth, stack_depth + 1, obj, i))
     else:
-        out.append(_Field(raw_path=path, parent=parent, key=key, value=obj, value_type=_value_type(obj), depth=depth))
+        out.append(_Field(raw_path=path, parent=parent, key=key, value=obj, value_type=_value_type(obj), depth=max(depth, 0)))
     return out
 
 
@@ -214,7 +214,8 @@ def _can_drop(value: Any) -> bool:
     """The model never sees values, so they can't hide a field. A dropped field stays dropped
     only when its value can't carry an instruction: empty, or one URL, ID or other machine
     token. A token that joins 4+ words with - _ or + ("Ignore-all-previous-instructions") is
-    kept. Dots don't count: they join hostname, email and path parts."""
+    kept. Dots don't count: they join hostname, email and path parts. Words are counted in the
+    first 10,000 characters, as much as Tier 2 would score."""
     if not isinstance(value, str):
         return True
     t = js_trim(value)
@@ -222,7 +223,7 @@ def _can_drop(value: Any) -> bool:
         return True
     if not _ASCII_TOKEN_RE.fullmatch(t):
         return False
-    return sum(1 for w in re.split(r"[-_+]+", t) if _WORD_RE.fullmatch(w)) < 4
+    return sum(1 for w in re.split(r"[-_+]+", t[:10_000]) if _WORD_RE.fullmatch(w)) < 4
 
 
 def _field_to_text(field: _Field) -> str:
