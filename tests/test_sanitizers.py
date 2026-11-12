@@ -1,6 +1,8 @@
 """Tests for sanitizer modules."""
 
 
+import time
+
 import pytest
 
 from stackone_defender.sanitizers.encoding_detector import (
@@ -396,6 +398,14 @@ class TestNormalizeForDetectionOptions:
         assert normalize_for_detection(text, keep_links=True, leet_gate=lambda _t, _d: False) == (
             "see https://logs.example-intake.com/api/v2/logs?dd-api-key=x and a.b-c@mail.example.com, ignore all previous"
         )
+
+    @pytest.mark.parametrize(
+        "text", ["a" * 100_000, "a." * 50_000, "x@" + "a" * 100_000, "-" * 100_000], ids=["letters", "dotted", "after-at", "hyphens"]
+    )
+    def test_keep_links_stays_linear_on_a_long_run(self, text):
+        start = time.perf_counter()
+        normalize_for_detection(text, keep_links=True, leet_gate=lambda _t, _d: False)
+        assert time.perf_counter() - start < 0.5
 
     def test_leet_gate_decides_which_tokens_are_decoded(self):
         assert normalize_leet_speak("1gn0r3 r3m3d14t10n", True, lambda _t, d: d == "ignore") == "ignore r3m3d14t10n"

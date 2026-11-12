@@ -290,6 +290,12 @@ def test_normalize_for_classification_without_wordpiece_tokenizer_decodes_leet(t
     assert normalize_for_classification("1gn0r3", str(tmp_path / "missing")) == "ignore"
 
 
+def test_classifier_normalises_with_its_own_model(tmp_path):
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"model": {"type": "Unigram", "vocab": [["a", 0]]}}))
+    assert Tier2Classifier(config={"onnx_model_path": str(tmp_path)}).normalize("U06SH7") == "UoSHt"
+    assert Tier2Classifier().normalize("U06SH7") == "U06SH7"
+
+
 @pytest.fixture(scope="module")
 def vocab():
     with open(os.path.join(get_default_model_path(), "tokenizer.json"), encoding="utf-8") as f:

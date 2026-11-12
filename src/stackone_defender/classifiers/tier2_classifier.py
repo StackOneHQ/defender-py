@@ -412,6 +412,10 @@ class Tier2Classifier:
             "latency_ms": _ms(start),
         }
 
+    def normalize(self, text: str) -> str:
+        """The text Tier 2 scores, normalised with this model's tokenizer."""
+        return normalize_for_classification(text, self._model_path)
+
     def prepare_chunks(self, text: str) -> dict[str, Any]:
         text = normalize_for_classification(text, self._model_path)
         if utf16_len(text) < self._min_text_length:

@@ -231,9 +231,11 @@ _INVISIBLE_RE = re.compile(r"[\u00ad\u180e\u200e\u200f\u2060-\u2064\ufe00-\ufe0f
 _ALL_INVISIBLE_RE = re.compile(r"[\u00ad\u180e\u200b-\u200f\u2060-\u2064\ufeff\ufe00-\ufe0f]")
 
 
-# URLs and emails, which separator splitting would turn into prose.
+# URLs and emails, which separator splitting would turn into prose. A match starts only where
+# its run of characters starts, so a long run is scanned once, not once per position.
 _LINK_RE = re.compile(
-    r"((?:[A-Za-z][A-Za-z0-9+.-]*://|www\.)[^\s\"'<>]+|[A-Za-z0-9_.+-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)"
+    r"((?<![A-Za-z0-9+.-])(?:[A-Za-z][A-Za-z0-9+.-]*://|www\.)[^\s\"'<>]+"
+    r"|(?<![A-Za-z0-9_.+-])[A-Za-z0-9_.+-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)"
 )
 
 

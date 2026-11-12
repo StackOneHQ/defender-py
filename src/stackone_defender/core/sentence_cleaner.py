@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ..classifiers.tier2_classifier import Tier2Classifier, _split_into_sentences, normalize_for_classification
+from ..classifiers.tier2_classifier import Tier2Classifier, _split_into_sentences
 from ..sanitizers.role_stripper import strip_role_markers
 from ..types import DataBoundary
 from ..utils.boundary import strip_boundary_patterns, wrap_with_boundary
@@ -27,7 +27,7 @@ def _clean_field(raw: str, tier2: Tier2Classifier, high_threshold: float) -> str
     if len(sentences) <= 1:
         return raw
     # Score what Tier 2 scored: the normalised text.
-    scores = tier2.classify_chunks_batch([normalize_for_classification(x) for x in sentences])
+    scores = tier2.classify_chunks_batch([tier2.normalize(x) for x in sentences])
     flagged = [(scores[i] if i < len(scores) else 0.0) >= high_threshold for i in range(len(sentences))]
     # Nothing dropped — return the field verbatim, never a reconstruction (a
     # rebuilt join can differ from the original and report a spurious change).
