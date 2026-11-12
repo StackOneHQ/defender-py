@@ -24,6 +24,7 @@ import stackone_defender
 from stackone_defender import create_prompt_defense
 from stackone_defender.classifiers.tier2_classifier import normalize_for_classification
 from stackone_defender.sanitizers.normalizer import normalize_for_detection
+from stackone_defender.sfe.preprocess import sfe_preprocess
 
 HERE = Path(__file__).parent
 FIXTURES = HERE / "conformance"
@@ -312,6 +313,18 @@ def _sfe_floor(inp: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sfe_text(inp: dict[str, Any]) -> dict[str, Any]:
+    texts: list[str] = []
+
+    class _Recording:
+        def predict_batch(self, batch: list[str]) -> list[dict[str, Any]]:
+            texts.extend(batch)
+            return [{"label": "pass", "prob": 1.0} for _ in batch]
+
+    sfe_preprocess(inp["payload"], {"predictor": _Recording()})
+    return {"texts": texts}
+
+
 def _obfuscation(inp: dict[str, Any]) -> dict[str, Any]:
     r = create_prompt_defense(enable_tier2=False).defend_tool_result({"notes": inp["text"]}, "test_tool")
     return {
@@ -328,6 +341,7 @@ ADAPTERS = {
     "tier3-redact": _redact,
     "tier3-policy": _policy,
     "sfe-floor": _sfe_floor,
+    "sfe-text": _sfe_text,
     "obfuscation": _obfuscation,
 }
 

@@ -179,7 +179,7 @@ def test_classifier_text_counts_utf16_units_has_no_lone_surrogates_and_no_value(
     path_text, surrogate_text, value_text = seen
     assert path_text.count("\U0001f600") == 128  # last 256 units, as TS slice(-256)
     assert "�" in surrogate_text and not any(0xD800 <= ord(c) <= 0xDFFF for c in surrogate_text)
-    assert value_text == "string d1 v"  # the value is not part of the text
+    assert value_text == "string d0 v"  # the value is not part of the text
 
 
 class _DropAll:

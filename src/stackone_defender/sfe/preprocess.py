@@ -174,7 +174,7 @@ def _extract_fields(
     obj: Any,
     depth_flag: dict[str, bool],
     path: str = "",
-    depth: int = 0,
+    depth: int = -1,
     stack_depth: int = 0,
     parent: Any = None,
     key: Any = "",
@@ -184,6 +184,7 @@ def _extract_fields(
         return []
 
     out: list[_Field] = []
+    # Top-level keys are depth 0 and lists don't add a level, as in training.
     if isinstance(obj, dict):
         for k, value in obj.items():
             child = _cap_path(f"{path}.{k}" if path else str(k))
