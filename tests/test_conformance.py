@@ -22,6 +22,7 @@ import pytest
 
 import stackone_defender
 from stackone_defender import create_prompt_defense
+from stackone_defender.classifiers.tier2_classifier import normalize_for_classification
 from stackone_defender.sanitizers.normalizer import normalize_for_detection
 
 HERE = Path(__file__).parent
@@ -314,7 +315,11 @@ def _sfe_fallback(inp: dict[str, Any]) -> dict[str, Any]:
 
 def _obfuscation(inp: dict[str, Any]) -> dict[str, Any]:
     r = create_prompt_defense(enable_tier2=False).defend_tool_result({"notes": inp["text"]}, "test_tool")
-    return {"normalised": normalize_for_detection(inp["text"]), "tier1Patterns": sorted(r.detections)}
+    return {
+        "normalised": normalize_for_detection(inp["text"]),
+        "tier2Text": normalize_for_classification(inp["text"]),
+        "tier1Patterns": sorted(r.detections),
+    }
 
 
 ADAPTERS = {
