@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.5](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.4...stackone-defender-v0.9.5) (2026-11-13)
+
+
+### Features
+
+* **ENG-3690:** pass connector and call args to Tier 3; let callers pin ONNX Runtime threads ([#76](https://github.com/StackOneHQ/defender-py/issues/76)) ([2eacc11](https://github.com/StackOneHQ/defender-py/commit/2eacc11735135a958c2f3bae49751349dd0b619f))
+
+
+### Bug Fixes
+
+* **ENG-3677:** score the payload when SFE keeps no scorable text ([#67](https://github.com/StackOneHQ/defender-py/issues/67)) ([419ebbd](https://github.com/StackOneHQ/defender-py/commit/419ebbdb5bc24a1472e25f8228ad98ba2deb0d42))
+* **ENG-3677:** score word-joined tokens in the SFE fallback; count min length in UTF-16 ([#70](https://github.com/StackOneHQ/defender-py/issues/70)) ([04cff8c](https://github.com/StackOneHQ/defender-py/commit/04cff8cab04281420a0b1857b76b1bca7686b0aa))
+* **ENG-3867:** classify SFE fields by path, not value ([#73](https://github.com/StackOneHQ/defender-py/issues/73)) ([96fb641](https://github.com/StackOneHQ/defender-py/commit/96fb64156153991299d0ffb3617a7401adb47409))
+* **ENG-3868:** stop Tier 2 cleanup from mangling IDs, emails and URLs ([#72](https://github.com/StackOneHQ/defender-py/issues/72)) ([faf7e1e](https://github.com/StackOneHQ/defender-py/commit/faf7e1e7389cf9a1f4af3d15be95b0dd2abcd4f6))
+* **ENG-3868:** undo obfuscation before Tier 1 and Tier 2 scan text ([#71](https://github.com/StackOneHQ/defender-py/issues/71)) ([37d61bc](https://github.com/StackOneHQ/defender-py/commit/37d61bcbf2e8e97cd85d911f7b3ee638f9d4086f))
+* **ENG-4070:** report unreadable payloads as unscanned, not high risk ([#69](https://github.com/StackOneHQ/defender-py/issues/69)) ([c1e1124](https://github.com/StackOneHQ/defender-py/commit/c1e112414e7b1e4228d65f580801f03509f9e140))
+
 ## [0.9.4](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.3...stackone-defender-v0.9.4) (2026-10-21)
 
 
