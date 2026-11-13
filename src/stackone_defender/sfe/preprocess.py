@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -10,7 +11,7 @@ from typing import Any, Protocol
 
 from ..config import DANGEROUS_KEYS, MAX_TRAVERSAL_DEPTH
 from ..utils.lfs import assert_not_lfs_pointer
-from ..utils.text import from_utf16, to_utf16, utf16_len
+from ..utils.text import from_utf16, js_trim, to_utf16, utf16_len
 
 _logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ def sfe_preprocess(value: Any, options: dict[str, Any] | None = None) -> SfePrep
         else:
             label = str(getattr(decision, "label", "pass"))
             prob = float(getattr(decision, "prob", 0.0))
-        target = drops if label == "drop" and prob >= threshold else keeps
+        target = drops if label == "drop" and prob >= threshold and _can_drop(candidate.value) else keeps
         target.setdefault(id(candidate.parent), set()).add(candidate.key)
     # An object reachable from two paths is one leaf: drop it only if no path kept it.
     for parent_id, keys in keeps.items():
@@ -146,8 +147,8 @@ class _Field:
     # The leaf's container and key. A drop removes this leaf only, not its siblings in other elements.
     parent: Any
     key: Any
+    value: Any
     value_type: str
-    value_truncated: str
     depth: int
 
 
@@ -173,7 +174,7 @@ def _extract_fields(
     obj: Any,
     depth_flag: dict[str, bool],
     path: str = "",
-    depth: int = 0,
+    depth: int = -1,
     stack_depth: int = 0,
     parent: Any = None,
     key: Any = "",
@@ -183,6 +184,7 @@ def _extract_fields(
         return []
 
     out: list[_Field] = []
+    # Top-level keys are depth 0 and lists don't add a level, as in training.
     if isinstance(obj, dict):
         for k, value in obj.items():
             child = _cap_path(f"{path}.{k}" if path else str(k))
@@ -192,10 +194,7 @@ def _extract_fields(
         for i, item in enumerate(obj):
             out.extend(_extract_fields(item, depth_flag, path, depth, stack_depth + 1, obj, i))
     else:
-        val = "" if obj is None else _js_head(str(obj), 500)
-        out.append(
-            _Field(raw_path=path, parent=parent, key=key, value_type=_value_type(obj), value_truncated=val, depth=depth)
-        )
+        out.append(_Field(raw_path=path, parent=parent, key=key, value=obj, value_type=_value_type(obj), depth=max(depth, 0)))
     return out
 
 
@@ -206,15 +205,35 @@ def _cap_path(path: str) -> str:
     return from_utf16(to_utf16(path)[-_MAX_PATH_CHARS:])
 
 
-def _js_head(s: str, n: int) -> str:
-    """JS `s.slice(0, n)`: the first n UTF-16 units."""
-    return from_utf16(to_utf16(s[:n])[:n])
+# One printable-ASCII token with no whitespace: a URL, ID or token, not prose.
+_ASCII_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
+_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _can_drop(value: Any) -> bool:
+    """The model never sees values, so they can't hide a field. A dropped field stays dropped
+    only when its value can't carry an instruction: empty, or one URL, ID or other machine
+    token. A token that joins 4+ words with - _ or + ("Ignore-all-previous-instructions") is
+    kept. Dots don't count: they join hostname, email and path parts. Words are counted in the
+    first 10,000 characters, as much as Tier 2 would score."""
+    if not isinstance(value, str):
+        return True
+    t = js_trim(value)
+    if not t:
+        return True
+    if not _ASCII_TOKEN_RE.fullmatch(t):
+        return False
+    return sum(1 for w in re.split(r"[-_+]+", t[:10_000]) if _WORD_RE.fullmatch(w)) < 4
 
 
 def _field_to_text(field: _Field) -> str:
+    """The text the FastText model was trained on: `to_text()` in solaris-labels/modal_train_path_model.py.
+
+    The value is left out on purpose: whether a field is writable belongs to the field, and an
+    attacker controls the value, so reading it let them make a writable field look like system data.
+    """
     path_tokens = field.raw_path.replace(".", " ").replace("_", " ").replace("-", " ")
-    val = _js_head(field.value_truncated, 200)
-    text = f"{field.value_type} d{field.depth} {path_tokens} {val}"
+    text = f"{field.value_type} d{field.depth} {path_tokens}"
     # from_utf16 turns lone surrogates into U+FFFD; the FastText binding raises on them.
     return from_utf16(text.replace("\r", " ").replace("\n", " "))
 

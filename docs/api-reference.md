@@ -50,7 +50,6 @@ class DefenseResult:
     # With no provider and non-blocking on_error, tier3_only falls back to T1 + T2 and leaves this None.
     tier3: Tier3Result | None = None          # verdict or skip metadata when present
     fields_dropped: list[str] = field(default_factory=list)
-    sfe_fallback: bool | None = None          # True when SFE kept no scorable text, so Tier 2 scored the original (URLs/IDs excluded)
     truncated_at_depth: bool | None = None
     latency_ms: float = 0.0
     # Cost telemetry — present only when the batched Tier 2 classifier ran

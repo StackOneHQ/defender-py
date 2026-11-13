@@ -468,9 +468,6 @@ class DefenseResult:
     # did not run — use ``result.tier3 is not None`` as the "Tier 3 ran" check.
     tier3: Tier3Result | None = None
     fields_dropped: list[str] = field(default_factory=list)
-    # True when SFE kept no text Tier 2 would score, so Tier 2 scored the original text instead
-    # (single ASCII tokens such as URLs and IDs excluded). None otherwise.
-    sfe_fallback: bool | None = None
     truncated_at_depth: bool | None = None
     latency_ms: float = 0.0
     # --- Cost telemetry (0.7.4) ---
