@@ -7,8 +7,10 @@ Provides a simple API for defending tool results against prompt injection.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -172,6 +174,29 @@ def _extract_strings(
     return strings
 
 
+_MAX_CALL_ARGS_CHARS = 2000
+
+
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _serialize_call_args(args: Any) -> str | None:
+    """The call's arguments as a string for the provider: compact JSON, close to TypeScript's
+    ``JSON.stringify``, or ``None`` when they can't be serialized. Lone surrogates are escaped
+    (JSON) or replaced (a string), so a provider can always encode the text as UTF-8."""
+    if args is None:
+        return None
+    if isinstance(args, str):
+        text = _LONE_SURROGATE.sub("\ufffd", args)
+    else:
+        try:
+            text = json.dumps(args, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except Exception:
+            return None
+        text = _LONE_SURROGATE.sub(lambda m: f"\\u{ord(m[0]):04x}", text)
+    return truncate(text, _MAX_CALL_ARGS_CHARS) if text else None
+
+
 def _caller_context(context: Mapping[str, Any] | None) -> dict[str, str]:
     """Copy only the caller-context fields, so a caller dict can't overwrite tool_name, mode or chunk."""
     if not context:
@@ -181,6 +206,11 @@ def _caller_context(context: Mapping[str, Any] | None) -> dict[str, str]:
         v = context.get(snake, context.get(camel))
         if isinstance(v, str):
             out[snake] = v
+    if isinstance(context.get("connector"), str):
+        out["connector"] = context["connector"]
+    args = _serialize_call_args(context.get("args"))
+    if args is not None:
+        out["args"] = args
     return out
 
 
@@ -799,8 +829,9 @@ class PromptDefense:
         When ``enable_tier3`` is on, this delegates to :meth:`defend_tool_result_async`
         via ``asyncio.run``. Call that method directly from async code (e.g. FastAPI).
 
-        ``context`` (``user_goal``, ``tool_description``) is passed to the Tier 3 provider. Both
-        can carry untrusted text; defender itself doesn't read them.
+        ``context`` (``user_goal``, ``tool_description``, ``connector``, ``args``) is passed to the
+        Tier 3 provider; ``args`` as a JSON string cut to 2,000 characters. All can carry untrusted
+        text; defender itself doesn't read them.
         """
         if self._tier3_enabled:
             try:
@@ -822,7 +853,7 @@ class PromptDefense:
         """
         start_time = time.perf_counter()
         depth_flag = {"hit": False}
-        caller = _caller_context(context)
+        caller = _caller_context(context) if self._tier3_enabled else {}
 
         if self._tier3_enabled and self._defender_mode == "tier3_only":
             provider = self._resolve_tier3_provider()

@@ -27,7 +27,7 @@ class BatchTokenStats:
     real_tokens: int = 0  # sum of real (non-pad) tokens across all chunks
     padded_tokens: int = 0  # tokens actually run through ONNX, including padding
 
-# Shared across all OnnxClassifier instances (keyed by resolved model dir path).
+# Shared across all OnnxClassifier instances (keyed by resolved model dir path and thread count).
 # Tuple is (session, tokenizer, count_tokenizer); the count tokenizer is
 # non-truncating so count_tokens reports true length (see _load_model).
 _session_cache: dict[str, tuple[object, object, object]] = {}
@@ -93,8 +93,15 @@ class OnnxClassifier:
         model_path: str | None = None,
         temperature_t: float | None = None,
         degeneracy_max_token_share: float | None = None,
+        onnx_threads: int | None = None,
     ):
         self._model_path = model_path or get_default_model_path()
+        if onnx_threads is not None and (
+            isinstance(onnx_threads, bool) or not isinstance(onnx_threads, int) or onnx_threads < 1
+        ):
+            raise ValueError(f"OnnxClassifier: onnx_threads must be a positive integer, got {onnx_threads!r}")
+        # ONNX Runtime intra-op threads; None = ONNX Runtime's default (one per core).
+        self._onnx_threads = onnx_threads
         self._session = None
         self._tokenizer = None
         # Non-truncating tokenizer used only by count_tokens (see _load_model).
@@ -154,7 +161,7 @@ class OnnxClassifier:
         self._load_model()
 
     def _load_model(self) -> None:
-        cache_key = str(Path(self._model_path).resolve())
+        cache_key = f"{Path(self._model_path).resolve()}|{self._onnx_threads or ''}"
         cached = _session_cache.get(cache_key)
         if cached:
             self._session, self._tokenizer, self._count_tokenizer = cached
@@ -198,7 +205,12 @@ class OnnxClassifier:
 
                 onnx_path = str(Path(self._model_path) / "model_quantized.onnx")
                 assert_not_lfs_pointer(onnx_path)  # clear error instead of a protobuf parse failure
-                self._session = ort.InferenceSession(onnx_path)
+                options = None
+                if self._onnx_threads is not None:
+                    options = ort.SessionOptions()
+                    options.intra_op_num_threads = self._onnx_threads
+                    options.inter_op_num_threads = 1
+                self._session = ort.InferenceSession(onnx_path, sess_options=options)
             except Exception as e:
                 _logger.warning("[defender] ONNX model failed to load: %s", e)
                 raise

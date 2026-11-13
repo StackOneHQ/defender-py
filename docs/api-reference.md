@@ -15,6 +15,8 @@ defense = create_prompt_defense(
     sanitize_content=True,  # False: disable sentence cleaning; boundary annotation is separate
     tier2_fields=["subject", "body", "snippet"],  # optional: scope Tier 2 to these JSON keys (default: all strings)
     tier2_config={"high_risk_threshold": 0.52},  # optional; defaults come from the bundled model's classifier_config.json
+    # tier2_config={"onnx_threads": 1} limits each Tier 2 session to one ONNX Runtime thread (default: one per core):
+    # helps when several processes share a machine, slows a single call on an idle one. Each value loads its own session.
     use_sfe=False,  # True, or {"threshold": 0.5, "predictor": ...}: SFE preprocessing before Tier 2
     enable_tier3=False,
     defender_mode="cascade",  # or "tier3_only"; ignored unless enable_tier3
@@ -26,7 +28,7 @@ Set Tier 2 thresholds with `tier2_config`. The bundled model's calibrated values
 
 ### `defense.defend_tool_result(value, tool_name, *, context=None)`
 
-Runs Tier 1 detection on the original payload, then Tier 2 on its strings (the SFE-filtered view when `use_sfe` is on). `tier2_fields` limits Tier 2 to those keys; omit it to classify all strings. The call is synchronous. With `enable_tier3=True` it runs Tier 3 in its own event loop and raises `RuntimeError` inside a running loop: use `await defense.defend_tool_result_async(...)` there. `context` (`user_goal`, `tool_description`) goes to the Tier 3 provider only.
+Runs Tier 1 detection on the original payload, then Tier 2 on its strings (the SFE-filtered view when `use_sfe` is on). `tier2_fields` limits Tier 2 to those keys; omit it to classify all strings. The call is synchronous. With `enable_tier3=True` it runs Tier 3 in its own event loop and raises `RuntimeError` inside a running loop: use `await defense.defend_tool_result_async(...)` there. `context` (`user_goal`, `tool_description`, `connector`, `args`) goes to the Tier 3 provider only; `args` reaches it as a JSON string cut to 2,000 characters. The built-in LLM provider puts only `user_goal` and `tool_description` in its prompt.
 
 ```python
 from dataclasses import dataclass, field
