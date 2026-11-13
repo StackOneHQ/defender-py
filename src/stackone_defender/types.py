@@ -212,7 +212,8 @@ class Tier3Provider(Protocol):
         """Classify text for prompt-injection risk (sync or awaitable).
 
         ``ctx`` keys: ``tool_name`` (also ``toolName``), ``mode``, ``chunk`` (``{"index", "total"}``
-        in tier3_only), ``user_goal`` and ``tool_description`` (untrusted caller context), and
+        in tier3_only), ``user_goal``, ``tool_description``, ``connector`` and ``args`` (untrusted
+        caller context; ``args`` is a JSON string cut to 2,000 characters), and
         ``deadline`` (``time.time()`` seconds, when ``tier3.timeout_ms`` is set). An async provider
         is cancelled at the deadline; a sync one can't be interrupted.
         """

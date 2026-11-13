@@ -74,7 +74,8 @@ from stackone_defender import Tier3Verdict, create_prompt_defense, set_default_t
 class MyProvider:
     def classify(self, text: str, *, ctx: dict[str, Any] | None = None) -> Tier3Verdict:
         # Call your LLM endpoint here (sync or awaitable). ctx has tool_name, mode, chunk,
-        # user_goal / tool_description (untrusted), and deadline when timeout_ms is set.
+        # user_goal / tool_description / connector / args (untrusted; args as a JSON string cut
+        # to 2,000 characters), and deadline when timeout_ms is set.
         verdict = call_my_llm(text, tool_name=(ctx or {}).get("tool_name"))
         return Tier3Verdict(decision="block" if verdict.block else "allow", score=verdict.p_block)
 

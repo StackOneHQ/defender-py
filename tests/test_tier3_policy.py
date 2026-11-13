@@ -201,6 +201,40 @@ class TestEventsAndMeta:
         assert ctx["mode"] == "tier3_only"  # a caller can't overwrite it
         assert sorted(c["chunk"]["index"] for c in rec.ctxs) == list(range(len(rec.ctxs)))
 
+    def test_connector_and_args_reach_provider(self):
+        rec = Recorder()
+        _run(
+            _t3only(rec).defend_tool_result_async(
+                {"body": "x"},
+                "gmail_list_messages",
+                context={"connector": "gmail", "args": {"query": "from:alice invoice", "maxResults": 10}},
+            )
+        )
+        assert rec.ctxs[0]["connector"] == "gmail"
+        assert rec.ctxs[0]["args"] == '{"query":"from:alice invoice","maxResults":10}'  # as JSON.stringify
+
+    def test_args_string_as_is_cut_and_non_ascii(self):
+        rec = Recorder()
+        d = _t3only(rec)
+        for args in ("id=42", {"body": "a" * 5000}, f"{'a' * 1999}\U0001F600", {"q": "café"}):
+            _run(d.defend_tool_result_async({"body": "x"}, "t", context={"args": args}))
+        got = [c["args"] for c in rec.ctxs]
+        assert got[0] == "id=42"
+        assert len(got[1]) == 2000 and got[1].startswith('{"body":"aaa')
+        assert got[2] == "a" * 1999  # 2,000 UTF-16 units, the emoji pair isn't split
+        assert got[3] == '{"q":"café"}'
+
+    def test_bad_args_and_connector_left_out(self):
+        rec = Recorder()
+        circular: dict = {}
+        circular["self"] = circular
+        d = _t3only(rec)
+        for ctx in ({"args": circular, "connector": 42}, {"args": ""}, {"args": None}, {"args": object()}):
+            _run(d.defend_tool_result_async({"body": "x"}, "t", context={**ctx, "tool_description": "d"}))
+        for c in rec.ctxs:
+            assert c["tool_description"] == "d"
+            assert "args" not in c and "connector" not in c
+
     def test_decide_gets_metadata_only(self):
         seen: list[Tier3DecisionInput] = []
 
@@ -289,6 +323,15 @@ class TestCascadePolicy:
         assert seen[0].mode == "cascade"
         assert seen[0].tier2.would_block is True
         assert seen[0].tier2.effective_score == pytest.approx(0.7)
+
+    def test_connector_and_args_reach_provider(self, mock_create):
+        rec = Recorder("allow")
+        self._defense(mock_create, rec).defend_tool_result(
+            {"a": "b"}, "gmail_get_message", context={"connector": "gmail", "args": {"id": "m1"}}
+        )
+        assert rec.ctxs[0]["mode"] == "cascade"
+        assert rec.ctxs[0]["connector"] == "gmail"
+        assert rec.ctxs[0]["args"] == '{"id":"m1"}'
 
     def test_generic_llm_provider_with_override_warns(self, mock_create, caplog, monkeypatch):
         monkeypatch.setattr(tier3_policy, "_generic_override_warned", False)

@@ -7,6 +7,7 @@ Provides a simple API for defending tool results against prompt injection.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -172,15 +173,40 @@ def _extract_strings(
     return strings
 
 
+_MAX_CALL_ARGS_CHARS = 2000
+
+
+def _serialize_call_args(args: Any) -> str | None:
+    """The call's arguments as a string for the provider (JSON like TypeScript's ``JSON.stringify``),
+    or ``None`` when they can't be serialized."""
+    if args is None:
+        return None
+    if isinstance(args, str):
+        text = args
+    else:
+        try:
+            text = json.dumps(args, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError, RecursionError):
+            return None
+    return truncate(text, _MAX_CALL_ARGS_CHARS) if text else None
+
+
 def _caller_context(context: Mapping[str, Any] | None) -> dict[str, str]:
     """Copy only the caller-context fields, so a caller dict can't overwrite tool_name, mode or chunk."""
     if not context:
         return {}
     out = {}
-    for snake, camel in (("user_goal", "userGoal"), ("tool_description", "toolDescription")):
+    for snake, camel in (
+        ("user_goal", "userGoal"),
+        ("tool_description", "toolDescription"),
+        ("connector", "connector"),
+    ):
         v = context.get(snake, context.get(camel))
         if isinstance(v, str):
             out[snake] = v
+    args = _serialize_call_args(context.get("args"))
+    if args is not None:
+        out["args"] = args
     return out
 
 
@@ -799,8 +825,9 @@ class PromptDefense:
         When ``enable_tier3`` is on, this delegates to :meth:`defend_tool_result_async`
         via ``asyncio.run``. Call that method directly from async code (e.g. FastAPI).
 
-        ``context`` (``user_goal``, ``tool_description``) is passed to the Tier 3 provider. Both
-        can carry untrusted text; defender itself doesn't read them.
+        ``context`` (``user_goal``, ``tool_description``, ``connector``, ``args``) is passed to the
+        Tier 3 provider; ``args`` as a JSON string cut to 2,000 characters. All can carry untrusted
+        text; defender itself doesn't read them.
         """
         if self._tier3_enabled:
             try:

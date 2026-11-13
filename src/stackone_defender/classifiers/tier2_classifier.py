@@ -246,7 +246,10 @@ class Tier2Classifier:
         self._degeneracy_max_token_share: float = float(merged["degeneracy_max_token_share"])
 
         self._onnx = OnnxClassifier(
-            self._model_path, self._temperature_t, self._degeneracy_max_token_share
+            self._model_path,
+            self._temperature_t,
+            self._degeneracy_max_token_share,
+            merged.get("onnx_threads"),
         )
 
     # ------------------------------------------------------------------
