@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -176,18 +177,23 @@ def _extract_strings(
 _MAX_CALL_ARGS_CHARS = 2000
 
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def _serialize_call_args(args: Any) -> str | None:
-    """The call's arguments as a string for the provider (JSON like TypeScript's ``JSON.stringify``),
-    or ``None`` when they can't be serialized."""
+    """The call's arguments as a string for the provider: compact JSON, close to TypeScript's
+    ``JSON.stringify``, or ``None`` when they can't be serialized. Lone surrogates are escaped
+    (JSON) or replaced (a string), so a provider can always encode the text as UTF-8."""
     if args is None:
         return None
     if isinstance(args, str):
-        text = args
+        text = _LONE_SURROGATE.sub("\ufffd", args)
     else:
         try:
             text = json.dumps(args, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        except (TypeError, ValueError, RecursionError):
+        except Exception:
             return None
+        text = _LONE_SURROGATE.sub(lambda m: f"\\u{ord(m[0]):04x}", text)
     return truncate(text, _MAX_CALL_ARGS_CHARS) if text else None
 
 
@@ -196,14 +202,12 @@ def _caller_context(context: Mapping[str, Any] | None) -> dict[str, str]:
     if not context:
         return {}
     out = {}
-    for snake, camel in (
-        ("user_goal", "userGoal"),
-        ("tool_description", "toolDescription"),
-        ("connector", "connector"),
-    ):
+    for snake, camel in (("user_goal", "userGoal"), ("tool_description", "toolDescription")):
         v = context.get(snake, context.get(camel))
         if isinstance(v, str):
             out[snake] = v
+    if isinstance(context.get("connector"), str):
+        out["connector"] = context["connector"]
     args = _serialize_call_args(context.get("args"))
     if args is not None:
         out["args"] = args
@@ -849,7 +853,7 @@ class PromptDefense:
         """
         start_time = time.perf_counter()
         depth_flag = {"hit": False}
-        caller = _caller_context(context)
+        caller = _caller_context(context) if self._tier3_enabled else {}
 
         if self._tier3_enabled and self._defender_mode == "tier3_only":
             provider = self._resolve_tier3_provider()

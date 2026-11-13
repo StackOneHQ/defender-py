@@ -406,6 +406,7 @@ class TestFixedWidthBuckets:
 
 
 class TestOnnxThreads:
+    @pytest.mark.skipif(not (_HAS_BUNDLED_MODEL and _HAS_ONNXRUNTIME), reason="needs onnxruntime and the model")
     def test_passes_threads_to_onnx_runtime_and_keeps_one_session_per_count(self, monkeypatch):
         import onnxruntime as ort
 
@@ -428,4 +429,4 @@ class TestOnnxThreads:
             OnnxClassifier(_MODEL_PATH, onnx_threads=n)
 
     def test_tier2_config_reaches_classifier(self):
-        assert Tier2Classifier({"onnx_threads": 1})._onnx._onnx_threads == 1
+        assert Tier2Classifier({"onnx_threads": 1}).get_config()["onnx_threads"] == 1

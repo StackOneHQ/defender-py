@@ -533,6 +533,7 @@ class Tier2Classifier:
             "onnx_model_path": self._model_path,
             "temperature_t": self.get_temperature(),
             "multihead": self._multihead,
+            "onnx_threads": self._onnx._onnx_threads,
             "degeneracy_max_token_share": self._degeneracy_max_token_share,
         }
 

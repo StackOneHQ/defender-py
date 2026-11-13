@@ -224,12 +224,27 @@ class TestEventsAndMeta:
         assert got[2] == "a" * 1999  # 2,000 UTF-16 units, the emoji pair isn't split
         assert got[3] == '{"q":"café"}'
 
+    def test_lone_surrogates_escaped_or_replaced(self):
+        rec = Recorder()
+        d = _t3only(rec)
+        _run(d.defend_tool_result_async({"body": "x"}, "t", context={"args": {"q": "a\ud800"}}))
+        _run(d.defend_tool_result_async({"body": "x"}, "t", context={"args": "a\ud800"}))
+        assert rec.ctxs[0]["args"] == '{"q":"a\\ud800"}'  # as JSON.stringify
+        assert rec.ctxs[1]["args"] == "a\ufffd"
+        for c in rec.ctxs:
+            c["args"].encode("utf-8")
+
     def test_bad_args_and_connector_left_out(self):
         rec = Recorder()
         circular: dict = {}
         circular["self"] = circular
         d = _t3only(rec)
-        for ctx in ({"args": circular, "connector": 42}, {"args": ""}, {"args": None}, {"args": object()}):
+        class Broken(dict):
+            def items(self):
+                raise KeyError("x")
+
+        bad = ({"args": circular, "connector": 42}, {"args": ""}, {"args": None}, {"args": object()}, {"args": Broken(a=1)})
+        for ctx in bad:
             _run(d.defend_tool_result_async({"body": "x"}, "t", context={**ctx, "tool_description": "d"}))
         for c in rec.ctxs:
             assert c["tool_description"] == "d"
