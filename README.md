@@ -190,7 +190,7 @@ Before you turn it on:
 
 - **What leaves your process:** in cascade, one chunk of up to `max_text_length` characters per escalated result. Whole-result reviews (`tier3_only`, or `cascade_review="result"`) send the serialized result, keys included, and fields `tier2_fields` leaves out, up to about `max_chunks × max_text_length` (about 50,000 characters by default). By default the rest goes unreviewed: `tier3_only` allows it, and cascade keeps Tier 2's verdict. `on_oversize` changes that.
 - **Cost:** one call per escalated result in cascade. Whole-result reviews make up to about `max_chunks` (default 5) calls per result, and `tier3_only` does that for every result. Set `timeout_ms` and `max_concurrency`.
-- **Failures:** by default a failure fails open. Cascade keeps Tier 2's verdict, and `tier3_only` drops the failed chunks, so an outage means `allow`. Set `on_error="block"` to fail closed.
+- **Failures:** by default a failure fails open. Cascade keeps Tier 2's verdict, and `tier3_only` drops the failed chunks, so an outage means `allow`. Set `on_error="block"` to fail closed: `tier3_only` then blocks on any failed chunk, and cascade blocks when Tier 2 rated the result medium or higher.
 - **Overrides:** in cascade an `allow` can undo a Tier 2 block. The judge reads attacker text, so use `allow_override=False` until you've tested it.
 
 Other providers, policy options and the result fields are in the [Tier 3 guide](./docs/llm-review.md).
