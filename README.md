@@ -159,7 +159,7 @@ This measures the package's actual allow/block decision on one public text datas
 
 ### Tier 3: optional LLM review
 
-Tier 3 sends tool output to an LLM you supply and applies its `block` / `allow` verdict. It's off by default and adds no LLM dependencies. The package doesn't bundle StackOne's hosted Tier 3 model or service, and the benchmarks above cover Tier 1 + Tier 2 only.
+Tier 3 sends tool output to an LLM you supply and applies its `block` / `allow` verdict. It's off by default. The OpenAI-compatible provider below needs the `[llm]` extra: `pip install "stackone-defender[llm]"`. The package doesn't bundle StackOne's hosted Tier 3 model or service, and the benchmarks above cover Tier 1 + Tier 2 only.
 
 ```python
 import os
@@ -184,11 +184,11 @@ Two modes, set with `defender_mode`:
 - `"cascade"` (default): Tier 3 runs only when the Tier 2 score is in the gray band (default `[0.3, 0.85)`). It reviews the chunk that drove the score, or the whole result with `tier3={"cascade_review": "result"}`.
 - `"tier3_only"`: Tier 3 reviews every tool result and makes the decision. Tier 1 still fills `detections` but doesn't block.
 
-Cascade only escalates when Tier 2 is loaded: with `enable_tier2=False` or without the `[onnx]` extra, Tier 3 never runs. Without a provider (`tier3={"provider": ...}` or `set_default_tier3_provider`), Defender warns once and runs Tier 1 + Tier 2 only. As with the other tiers, blocking needs `block_high_risk=True`.
+Cascade only escalates when Tier 2 is loaded: with `enable_tier2=False` or without the `[onnx]` extra, Tier 3 never runs. Without a provider (`tier3={"provider": ...}` or `set_default_tier3_provider`), Defender warns once and runs Tier 1 + Tier 2 only, unless `on_error="block"` makes it fail closed. As with the other tiers, blocking needs `block_high_risk=True`.
 
 Before you turn it on:
 
-- **What leaves your process:** in cascade, one chunk of up to `max_text_length` characters per escalated result. Whole-result reviews (`tier3_only`, or `cascade_review="result"`) send the serialized result, keys included, and fields `tier2_fields` leaves out, up to about `max_chunks × max_text_length` (about 50,000 characters by default). By default anything past that is allowed unreviewed; `on_oversize` changes that.
+- **What leaves your process:** in cascade, one chunk of up to `max_text_length` characters per escalated result. Whole-result reviews (`tier3_only`, or `cascade_review="result"`) send the serialized result, keys included, and fields `tier2_fields` leaves out, up to about `max_chunks × max_text_length` (about 50,000 characters by default). By default the rest goes unreviewed: `tier3_only` allows it, and cascade keeps Tier 2's verdict. `on_oversize` changes that.
 - **Cost:** one call per escalated result in cascade. Whole-result reviews make up to about `max_chunks` (default 5) calls per result, and `tier3_only` does that for every result. Set `timeout_ms` and `max_concurrency`.
 - **Failures:** by default a failure fails open. Cascade keeps Tier 2's verdict, and `tier3_only` drops the failed chunks, so an outage means `allow`. Set `on_error="block"` to fail closed.
 - **Overrides:** in cascade an `allow` can undo a Tier 2 block. The judge reads attacker text, so use `allow_override=False` until you've tested it.
