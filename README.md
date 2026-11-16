@@ -157,9 +157,43 @@ Dataset: [xxz224/prompt-injection-attack-dataset](https://huggingface.co/dataset
 
 This measures the package's actual allow/block decision on one public text dataset. It is not an end-to-end agent benchmark or a production false-positive estimate. See the [full results, limits and reproduction steps](./benchmarks/local-defense/README.md) for the pinned dataset, runtime versions, confusion counts and configuration.
 
-### Optional LLM review
+### Tier 3: optional LLM review
 
-The package includes provider adapters for a model you supply (Tier 3). It does not bundle StackOne's hosted Tier 3 model or service. This README and its evaluations cover the local Tier 1 + Tier 2 path. See the [provider integration reference](./docs/llm-review.md) for the optional adapters.
+Tier 3 sends tool output to an LLM you supply and applies its `block` / `allow` verdict. It's off by default and adds no LLM dependencies. The package doesn't bundle StackOne's hosted Tier 3 model or service, and the benchmarks above cover Tier 1 + Tier 2 only.
+
+```python
+import os
+
+from stackone_defender import create_openai_compatible_tier3_provider, create_prompt_defense
+
+provider = create_openai_compatible_tier3_provider(
+    base_url="https://api.openai.com/v1",
+    api_key=os.environ["OPENAI_API_KEY"],
+    model=os.environ["OPENAI_MODEL"],
+)
+
+defense = create_prompt_defense(
+    block_high_risk=True,
+    enable_tier3=True,
+    tier3={"provider": provider, "allow_override": False, "timeout_ms": 5000},
+)
+```
+
+Two modes, set with `defender_mode`:
+
+- `"cascade"` (default): Tier 3 runs only when the Tier 2 score is in the gray band (default `[0.3, 0.85)`). It reviews the chunk that drove the score, or the whole result with `tier3={"cascade_review": "result"}`.
+- `"tier3_only"`: Tier 3 reviews every tool result and makes the decision. Tier 1 still fills `detections` but doesn't block.
+
+Cascade only escalates when Tier 2 is loaded: with `enable_tier2=False` or without the `[onnx]` extra, Tier 3 never runs. Without a provider (`tier3={"provider": ...}` or `set_default_tier3_provider`), Defender warns once and runs Tier 1 + Tier 2 only. As with the other tiers, blocking needs `block_high_risk=True`.
+
+Before you turn it on:
+
+- **What leaves your process:** in cascade, one chunk of up to `max_text_length` characters per escalated result. Whole-result reviews (`tier3_only`, or `cascade_review="result"`) send the serialized result, keys included, and fields `tier2_fields` leaves out, up to about `max_chunks × max_text_length` (about 50,000 characters by default). By default anything past that is allowed unreviewed; `on_oversize` changes that.
+- **Cost:** one call per escalated result in cascade. Whole-result reviews make up to about `max_chunks` (default 5) calls per result, and `tier3_only` does that for every result. Set `timeout_ms` and `max_concurrency`.
+- **Failures:** by default a failure fails open. Cascade keeps Tier 2's verdict, and `tier3_only` drops the failed chunks, so an outage means `allow`. Set `on_error="block"` to fail closed.
+- **Overrides:** in cascade an `allow` can undo a Tier 2 block. The judge reads attacker text, so use `allow_override=False` until you've tested it.
+
+Other providers, policy options and the result fields are in the [Tier 3 guide](./docs/llm-review.md).
 
 ### `allowed` vs `risk_level`
 

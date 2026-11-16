@@ -170,7 +170,7 @@ class Tier3DecisionRan:
     decision: Tier3Decision
     refused: bool
     score: float | None = None
-    # tier3_only: chunks that failed or were aborted by stop_on_first_block.
+    # Whole-result reviews: chunks that failed or were aborted by stop_on_first_block.
     unreviewed_chunks: int | None = None
     ran: Literal[True] = True
 
