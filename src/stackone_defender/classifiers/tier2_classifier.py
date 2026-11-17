@@ -19,7 +19,7 @@ from typing import Any
 from ..sanitizers.normalizer import normalize_for_detection, normalize_unicode
 from ..types import MultiheadConfig, RiskLevel, Tier2Result
 from ..utils.boundary import strip_boundary_patterns
-from ..utils.text import utf16_len
+from ..utils.text import truncate, utf16_len
 from .onnx_classifier import BatchTokenStats, OnnxClassifier, get_default_model_path
 
 _logger = logging.getLogger(__name__)
@@ -436,14 +436,15 @@ class Tier2Classifier:
             return {"chunks": [], "skipped": True, "skip_reason": "Text below minTextLength"}
 
         model_max_len = self._onnx.get_max_length()
-        truncated = len(text) > self._max_text_length
-        bounded = text[: self._max_text_length] if truncated else text
+        # Lengths are UTF-16 code units, as in the TS package.
+        truncated = utf16_len(text) > self._max_text_length
+        bounded = truncate(text, self._max_text_length) if truncated else text
         try:
             self._onnx.warmup()
         except Exception as e:
             return {"chunks": [], "skipped": True, "skip_reason": f"Warmup error: {e}"}
 
-        if len(bounded) + 2 <= model_max_len:
+        if utf16_len(bounded) + 2 <= model_max_len:
             return {"chunks": [bounded], "skipped": False, "truncated": truncated}
 
         try:

@@ -120,14 +120,13 @@ The default open source scan combines two local detection layers:
 
 Detects (never rewrites) injection signals and records them as evidence:
 
-When Tier 2 is on, Tier 1 can't block alone. Its detections count only when Tier 2's undamped score (`tier2_raw_score`) is at least 0.3, or when Tier 2 didn't read the text they were found in: an object key, a field longer than Tier 2's 10,000-character cap, or text Tier 2 cut or set aside as unreadable. Otherwise `detections` still lists them and `tier1_gated` is `True`. With Tier 2 off or unavailable, Tier 1 blocks alone.
-
-
 - **Obfuscation normalization** (for matching only): undoes Greek and Cyrillic look-alikes, leetspeak, words joined by `-` `_` `.`, spaced-out letters and control characters. Tier 2 scores the same normalized text; the returned content is never normalized
 - **Role markers**: `SYSTEM:`, `ASSISTANT:`, `<system>`, `[INST]`, etc.
 - **Instruction-override patterns**: phrases like "ignore previous instructions"
 - **Encoding detection**: decode-then-detect: a decoded payload is escalated only if it trips a real attack pattern. Tier 2 scores the decoded text too
 - **Boundary annotation (opt-in)**: `[UD-{id}]…[/UD-{id}]` wrappers when `annotate_boundary=True` (npm: `annotateBoundary`). Use `generate_boundary_instructions` from the package root in prompts when you enable wrapping.
+
+When Tier 2 is on, Tier 1 can't block alone. Its detections count only when Tier 2's undamped score (`tier2_raw_score`) is at least 0.3, or when Tier 2 didn't read the text they were found in: an object key, a field longer than Tier 2's 10,000-character cap, or text Tier 2 cut or set aside as unreadable. Otherwise `detections` still lists them and `tier1_gated` is `True`. With Tier 2 off or unavailable, Tier 1 blocks alone.
 
 ### Tier 2: ML classification (ONNX)
 
