@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
@@ -26,6 +26,7 @@ class BatchTokenStats:
 
     real_tokens: int = 0  # sum of real (non-pad) tokens across all chunks
     padded_tokens: int = 0  # tokens actually run through ONNX, including padding
+    degenerate_rows: list[int] = field(default_factory=list)  # rows the degeneracy guard scored 0
 
 # Shared across all OnnxClassifier instances (keyed by resolved model dir path and thread count).
 # Tuple is (session, tokenizer, count_tokenizer); the count tokenizer is
@@ -314,6 +315,8 @@ class OnnxClassifier:
         for i, enc in enumerate(encodings):
             if self._is_degenerate(enc.ids):
                 pairs[i] = (0.0, None)
+                if stats is not None:
+                    stats.degenerate_rows.append(i)
 
         return cast(list[tuple[float, float | None]], pairs)
 

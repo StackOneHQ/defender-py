@@ -320,6 +320,9 @@ class SanitizationMetadata:
     # max_field_analysis_length, or a wide array/object only partially scanned).
     # Content is always returned in full — only detection coverage was reduced.
     analysis_truncated: bool = False
+    # The texts Tier 1 found patterns in: field values (up to the analysis cap), decoded text and
+    # object keys. Tier 1 can only block when Tier 2 agrees, and only for text Tier 2 also read.
+    tier1_match_texts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -455,6 +458,10 @@ class DefenseResult:
     # Pre-density / pre-rule global max-main score; forensic snapshot. ``None``
     # when Tier 2 was skipped or no chunks were classified.
     tier2_raw_score: float | None = None
+    # True when Tier 1 found patterns but they did not count toward the verdict, because
+    # tier2_raw_score was below 0.3 and Tier 2 read every text the patterns were found in.
+    # ``detections`` still lists them. ``None`` otherwise.
+    tier1_gated: bool | None = None
     # Aux-head score of the decision-relevant chunk under multi-head config.
     # ``None`` under single-head (no aux signal).
     tier2_aux_score: float | None = None

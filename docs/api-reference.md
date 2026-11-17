@@ -43,7 +43,8 @@ class DefenseResult:
     patterns_by_field: dict[str, list[str]]   # patterns detected per field
     detected_field_count: int                 # count of fields with a Tier-1 detection (keys of patterns_by_field); threat-count signal (fields_sanitized len no longer tracks this)
     tier2_score: float | None = None
-    tier2_raw_score: float | None = None
+    tier2_raw_score: float | None = None      # undamped max-chunk score; Tier 1 detections block only when this is >= 0.3 (see tier1_gated)
+    tier1_gated: bool | None = None           # True when Tier 1 found patterns but they didn't count: tier2_raw_score < 0.3 and Tier 2 read every matched text
     tier2_aux_score: float | None = None      # set only when tier2_config["multihead"] is set
     tier2_multihead_blocked: bool | None = None
     tier2_skip_reason: str | None = None

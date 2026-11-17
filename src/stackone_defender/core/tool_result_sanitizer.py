@@ -334,6 +334,8 @@ class ToolResultSanitizer:
             result = self._pattern_detector.analyze(analysis_value)
             if result.has_detections:
                 tier1_patterns = list(dict.fromkeys(m.pattern for m in result.matches))
+                if tier1_patterns:
+                    metadata.tier1_match_texts.append(analysis_value)
                 risk_level = _risk_ladder(risk_level, result.suggested_risk)
                 if context.cumulative_risk and result.matches:
                     self._update_cumulative_risk(context.cumulative_risk, result.suggested_risk, tier1_patterns)
@@ -349,6 +351,7 @@ class ToolResultSanitizer:
                     enc_patterns = [m.pattern for m in enc.matches]
                     tier1_patterns = list(dict.fromkeys(tier1_patterns + enc_patterns))
                     escalated_from_encoding = True
+                    metadata.tier1_match_texts.append(decoded)
                     risk_level = _risk_ladder(risk_level, enc.suggested_risk)
                     if context.cumulative_risk:
                         self._update_cumulative_risk(context.cumulative_risk, enc.suggested_risk, enc_patterns)
@@ -381,6 +384,7 @@ class ToolResultSanitizer:
         if not result.has_detections or not result.matches:
             return
         patterns = [m.pattern for m in result.matches]
+        metadata.tier1_match_texts.append(analysis_key)
         path = f"{key_path} (key)"
         metadata.fields_sanitized.append(path)
         metadata.methods_by_field[path] = ["pattern_removal"]

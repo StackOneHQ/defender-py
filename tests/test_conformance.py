@@ -334,6 +334,12 @@ def _obfuscation(inp: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tier1_gate(inp: dict[str, Any]) -> dict[str, Any]:
+    defense = create_prompt_defense(block_high_risk=True, enable_tier2=inp.get("tier2", True))
+    r = _run(defense.defend_tool_result_async(inp["payload"], inp.get("toolName", "generic_get_record")))
+    return {"allowed": r.allowed, "tier1Gated": r.tier1_gated is True, "detections": sorted(r.detections)}
+
+
 ADAPTERS = {
     "tier3-serialize": _serialize,
     "tier3-prompt": _prompt,
@@ -343,6 +349,7 @@ ADAPTERS = {
     "sfe-floor": _sfe_floor,
     "sfe-text": _sfe_text,
     "obfuscation": _obfuscation,
+    "tier1-gate": _tier1_gate,
 }
 
 
