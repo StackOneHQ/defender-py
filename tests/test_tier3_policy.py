@@ -636,3 +636,54 @@ class TestOpenAIOptionValidation:
         with pytest.raises(Exception, match="HTTP 503"):
             _run(_openai(handler, retries=5).classify("x", ctx={"deadline": deadline}))
         assert calls[-1] < deadline
+
+
+@pytest.mark.model
+class TestCascadeReview:
+    """cascade_review="result" (ENG-3692); the decisions are in the tier3-policy conformance cases."""
+
+    def _cascade(self, provider, **tier3):
+        return create_prompt_defense(
+            enable_tier1=False,
+            enable_tier2=True,
+            tier2_config={"high_risk_threshold": 0},
+            block_high_risk=True,
+            enable_tier3=True,
+            tier3={"provider": provider, "escalation_band": {"lower": 0, "upper": 1}, **tier3},
+        )
+
+    def test_result_reviews_every_chunk_with_cascade_mode_and_index(self):
+        rec = Recorder("allow")
+        events: list[Tier3Event] = []
+        d = self._cascade(rec, cascade_review="result", max_text_length=200, on_event=events.append)
+        r = _run(d.defend_tool_result_async(_many_chunks(), "t"))
+        assert r.tier3_chunk_summary is not None and r.tier3_chunk_summary.chunks > 1
+        assert len(rec.ctxs) == r.tier3_chunk_summary.chunks
+        assert {c["mode"] for c in rec.ctxs} == {"cascade"}
+        assert sorted(c["chunk"]["index"] for c in rec.ctxs) == list(range(len(rec.ctxs)))
+        assert {e.mode for e in events} == {"cascade"}
+
+    def test_chunk_is_the_default(self):
+        rec = Recorder("allow")
+        r = _run(self._cascade(rec, max_text_length=200).defend_tool_result_async(_many_chunks(), "t"))
+        assert len(rec.ctxs) == 1 and "chunk" not in rec.ctxs[0]
+        assert r.tier3_chunk_summary is None
+
+
+class TestCascadeReviewOption:
+    def test_invalid_value_warns_and_uses_chunk(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            d = create_prompt_defense(enable_tier3=True, tier3={"cascade_review": "everything"})
+        assert d._tier3_cascade_review == "chunk"
+        assert "invalid tier3.cascade_review" in caplog.text
+
+    def test_warns_in_tier3_only(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            create_prompt_defense(enable_tier3=True, defender_mode="tier3_only", tier3={"cascadeReview": "result"})
+        assert "no effect in tier3_only" in caplog.text
+
+    def test_on_error_block_makes_on_oversize_scan_anyway(self):
+        d = create_prompt_defense(enable_tier3=True, tier3={"cascade_review": "result", "on_error": "block"})
+        assert d._tier3_on_oversize == "scan_anyway"
+        d = create_prompt_defense(enable_tier3=True, tier3={"on_error": "block"})
+        assert d._tier3_on_oversize == "skip"

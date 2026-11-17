@@ -16,7 +16,7 @@ An LLM reviews the cases Tier 2 is unsure about (cascade), or every tool result 
 
 Two modes, selected via `defender_mode`:
 
-- **`"cascade"`** (default): Tier 1 → Tier 2 → Tier 3, with Tier 3 invoked only when the Tier 2 effective score falls in the gray band (default `[0.3, 0.85)`). The Tier 3 verdict overrides Tier 2 on the escalated chunk: a `block` forces a block, an `allow` can undo a Tier 2 block, subject to `allow_override`. Outside the band defender skips the round trip.
+- **`"cascade"`** (default): Tier 1 → Tier 2 → Tier 3, with Tier 3 invoked only when the Tier 2 effective score falls in the gray band (default `[0.3, 0.85)`). The Tier 3 verdict overrides Tier 2 on the escalated chunk: a `block` forces a block, an `allow` can undo a Tier 2 block, subject to `allow_override`. Outside the band defender skips the round trip. By default Tier 3 sees only the chunk that drove the Tier 2 score; with `cascade_review="result"` it reviews the whole result in chunks, as in `tier3_only`, and content past the ceiling keeps Tier 2's verdict unless `on_oversize` blocks it.
 - **`"tier3_only"`**: skip Tier 2. Tier 3 verdicts and your error / oversize policies decide whether to block. Tier 1 still fills `detections` but doesn't block. `sanitized` is the original content.
 
 Set `OPENAI_API_KEY` and `OPENAI_MODEL` before running this example. Adjust `response_format` and token options to match your endpoint.
@@ -89,8 +89,9 @@ defense = create_prompt_defense(
         "provider": MyProvider(),                          # optional: overrides the registry for this instance
         "escalation_band": {"lower": 0.3, "upper": 0.85},  # cascade gray band; [lower, upper), defaults shown
         "max_text_length": 10000,                          # max chars per provider call
-        "max_chunks": 5,                                   # tier3_only: chunks reviewed per tool result
-        "on_oversize": "skip",                             # tier3_only: "skip" | "block" | "scan_anyway"
+        "cascade_review": "chunk",                         # cascade: "chunk" | "result" (the whole result)
+        "max_chunks": 5,                                   # whole-result reviews: chunks per tool result
+        "on_oversize": "skip",                             # whole-result reviews: "skip" | "block" | "scan_anyway"
         "block_threshold": 0.622,                          # optional; decide on score, not the model's word
     },
 )
@@ -98,7 +99,7 @@ defense = create_prompt_defense(
 
 Defender looks up the registered provider on every call, so registering after construction works. `set_default_tier3_provider(None)` clears it (useful in tests), and `get_default_tier3_provider()` reads it.
 
-**What the reviewer sees (`tier3_only`).** The tool result is serialized as `field: value` lines, one block per record, so a bare value keeps its field name (`status: create` rather than `create`, which reads like an instruction). Nested keys are dotted (`user.name: …`), list items are indexed (`items[0]: …`), and each line of a multi-line value keeps its prefix. A large list of only numbers collapses to `key: [N numbers]`. Keys are reviewed even when the value is a number, boolean, `None` or empty, because keys can carry injected text. Python-only types are reviewed too: mappings and dataclasses as objects, sets and other sequences as lists, UTF-8 `bytes` as text, and anything else as `str(value)`.
+**What the reviewer sees (whole-result reviews).** In cascade, the reviewer sees the Tier 2 chunk that drove the score. In `tier3_only`, or cascade with `cascade_review="result"`, it sees the whole tool result, including fields `tier2_fields` leaves out. The tool result is serialized as `field: value` lines, one block per record, so a bare value keeps its field name (`status: create` rather than `create`, which reads like an instruction). Nested keys are dotted (`user.name: …`), list items are indexed (`items[0]: …`), and each line of a multi-line value keeps its prefix. A large list of only numbers collapses to `key: [N numbers]`. Keys are reviewed even when the value is a number, boolean, `None` or empty, because keys can carry injected text. Python-only types are reviewed too: mappings and dataclasses as objects, sets and other sequences as lists, UTF-8 `bytes` as text, and anything else as `str(value)`.
 
 The serialized text is split into chunks of at most `max_text_length` characters (lengths count UTF-16 code units, as in the TypeScript package). Neighbouring chunks overlap by up to 500 characters, reducing the chance that an injection is split across review windows. All chunks are reviewed in parallel, and any blocking chunk blocks the result. `result.tier3_chunk_summary` reports `chunks`, `blocked` and `blocking_chunk`.
 
@@ -119,15 +120,16 @@ With the default `on_error="allow"`, a failed chunk is skipped (fail open), and 
 | Option | Default | What it does |
 |---|---|---|
 | `allow_override` | `True` | Cascade: whether a Tier-3 `allow` can undo a Tier-2 block. `False`: Tier 3 only adds blocks. `{"max_tier2_score": x}`: only when Tier 2's undamped score is below `x`. A general-purpose LLM can be talked into `allow`, so prefer `False` or a cap. Defender warns once when it's `True` with a provider from `create_llm_tier3_provider` or `create_openai_compatible_tier3_provider`. |
-| `on_error` | cascade `"tier2"`, tier3_only `"allow"` | What a failure (error, timeout, invalid verdict) does. `"tier2"` keeps Tier 2's verdict. `"allow"` treats it as an allow. `"block"` blocks: in cascade when Tier 2 rated the payload medium or higher (with the bundled model Tier 2 rarely reports `medium`: its band is [0.5, 0.52)); in tier3_only when any chunk failed (and `on_oversize` then defaults to `"scan_anyway"`). A missing provider fails closed too. `"tier2"` isn't valid in tier3_only: defender warns and uses `"allow"`. |
-| `decide` | none | `decide(Tier3DecisionInput) -> "block" \| "allow" \| "default"`, called once per call after Tier 3 ran or failed. Replaces `allow_override` and `on_error` for that call. Gets metadata only (never content). Must be synchronous. A raise or bad return means `"default"`. It can't undo a Tier 1 detection, override `on_oversize`, or block when `block_high_risk=False`. |
+| `on_error` | cascade `"tier2"`, tier3_only `"allow"` | What a failure (error, timeout, invalid verdict) does. `"tier2"` keeps Tier 2's verdict. `"allow"` treats it as an allow. `"block"` blocks: in cascade when Tier 2 rated the payload medium or higher (with the bundled model Tier 2 rarely reports `medium`: its band is [0.5, 0.52)); in whole-result reviews when any chunk failed (and `on_oversize` then defaults to `"scan_anyway"`). A missing provider fails closed too. `"tier2"` isn't valid in tier3_only: defender warns and uses `"allow"`. |
+| `decide` | none | `decide(Tier3DecisionInput) -> "block" \| "allow" \| "default"`, called once per call after Tier 3 ran or failed (in cascade, only when escalated; in a whole-result review, only when at least one chunk was sent to the provider). Replaces `allow_override` and `on_error` for that call. Gets metadata only (never content). Must be synchronous. A raise or bad return means `"default"`. It can't undo a Tier 1 detection, override `on_oversize`, or block when `block_high_risk=False`. |
 | `timeout_ms` | none | Per provider call, from when it gets a concurrency slot. An async provider is cancelled at the deadline (`ctx["deadline"]`); a sync one can't be interrupted. |
 | `max_concurrency` | unbounded | Max in-flight provider calls per instance, per event loop. Each sync `defend_tool_result` call runs its own loop, so the cap doesn't span threads that use the sync API. Set `timeout_ms` with it. |
-| `stop_on_first_block` | `False` | tier3_only: cancel the remaining chunk calls once one blocks. |
+| `cascade_review` | `"chunk"` | Cascade: what Tier 3 reviews when a result escalates. `"chunk"`: the chunk that drove Tier 2's score. `"result"`: the whole result, chunked as in `tier3_only` (up to about `max_chunks` calls). An allow on every chunk counts as Tier 3's allow; a failed chunk is a Tier 3 failure, so `on_error` decides. |
+| `stop_on_first_block` | `False` | Whole-result reviews: cancel the remaining chunk calls once one blocks. |
 | `on_event` | none | Called once per provider call with a `Tier3Event` (kind, mode, chunk, latency, usage, redacted error code). No content. Exceptions are ignored. |
 | `include_raw` | `True` | Keep `raw` on `result.tier3`. `raw` can quote tool content. |
 
-**Result fields.** `result.tier3` is a `Tier3Verdict` (or a `Tier3Skip` when no verdict was obtained) and `None` when Tier 3 didn't run. Besides `decision`, `score`, `reason`, `refused` and `prompt_version`, defender sets: `errored` (a real failure), `note` (why the outcome isn't the verdict's alone), `override_applied` / `override_suppressed` (cascade), and `decided_by` (`"policy"` or `"options"` when `decide` is set). Provider error text in `skip_reason`, `note` and events is redacted (keys, tokens, URL paths) and capped. `Tier3Skip`, `Tier3Event` and `Tier3DecisionInput` are in `stackone_defender.types`.
+**Result fields.** `result.tier3` is a `Tier3Verdict` (or a `Tier3Skip` when no verdict was obtained) and `None` when Tier 3 didn't run. Besides `decision`, `score`, `reason`, `refused` and `prompt_version`, defender sets: `errored` (a real failure), `note` (why the outcome isn't the verdict's alone), `override_applied` / `override_suppressed` (cascade), and `decided_by` (`"policy"` or `"options"` when `decide` ran). Provider error text in `skip_reason`, `note` and events is redacted (keys, tokens, URL paths) and capped. `Tier3Skip`, `Tier3Event` and `Tier3DecisionInput` are in `stackone_defender.types`.
 
 - `allowed` is the final answer. With `allow_override=False`, `result.tier3.decision` can be `"allow"` while `allowed` is `False`.
 - Defender warns once after 20 consecutive provider failures on one instance, and once after 20 consecutive refusals or unusable replies. Use `on_event` for alerting.

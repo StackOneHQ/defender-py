@@ -62,6 +62,7 @@ _tier2_unavailable_warned = False
 _DEFAULT_TIER3_BAND = Tier3EscalationBand(lower=0.3, upper=0.85)
 _DEFAULT_TIER3_MAX_TEXT_LENGTH = 10000
 _TIER3_ON_OVERSIZE = ("skip", "block", "scan_anyway")
+_TIER3_CASCADE_REVIEW = ("chunk", "result")
 
 
 @dataclass
@@ -111,6 +112,41 @@ class _Tier2Outcome:
     high_risk_values: set[str] = field(default_factory=set)
     # True when string extraction threw: the payload couldn't be scanned. Strict mode blocks it.
     payload_error: bool = False
+
+
+@dataclass
+class _WholeResultReview:
+    """The outcome of a Tier 3 review of the whole tool result (tier3_only, or cascade_review "result")."""
+
+    # A blocking chunk's verdict if any, else the highest-score allow.
+    verdict: Tier3Verdict | None = None
+    skip_reason: str | None = None
+    # on_oversize blocked before review ("block", or "scan_anyway" with nothing fitting).
+    oversize_block: bool = False
+    chunk_summary: Tier3ChunkSummary | None = None
+    # The payload couldn't be serialized, so nothing was reviewed.
+    payload_error: bool = False
+    review_ran: bool = False
+    chunk_failures: int = 0
+    chunk_total: int = 0
+    first_chunk_failure: str | None = None
+    aborted_chunks: int = 0
+    # Set when content past the ceiling went unreviewed: the number of chunks that were.
+    overflow_chunks: int | None = None
+    # Some content went unreviewed for size, including when none of it fit.
+    oversize: bool = False
+
+
+@dataclass
+class _CascadeTier3:
+    """What cascade's Tier 3 step adds to the result."""
+
+    result: Tier3Result | None = None
+    # True adds a block, False removes the Tier 2 threat, None keeps Tier 2's verdict.
+    override_block: bool | None = None
+    chunk_summary: Tier3ChunkSummary | None = None
+    payload_error: bool = False
+    aborted_chunks: int = 0
 
 
 # Containers Tier 2 walks like lists (Mappings are walked like dicts).
@@ -384,9 +420,23 @@ class PromptDefense:
                     "Falling back to the provider's decision.",
                     block_threshold,
                 )
+        self._tier3_cascade_review = "chunk"
+        cascade_review = tier3_opts.get("cascade_review", tier3_opts.get("cascadeReview"))
+        if cascade_review is not None:
+            if cascade_review in _TIER3_CASCADE_REVIEW:
+                self._tier3_cascade_review = cascade_review
+                if self._defender_mode == "tier3_only":
+                    _logger.warning("[defender] tier3.cascade_review has no effect in tier3_only mode.")
+            else:
+                _logger.warning(
+                    '[defender] invalid tier3.cascade_review %r — must be "chunk" or "result". Using "chunk".',
+                    cascade_review,
+                )
         self._t3 = Tier3Policy(tier3_opts, self._defender_mode, self._tier3_block_threshold)
-        # on_error="block" in tier3_only closes the oversize door too, unless on_oversize was chosen.
-        if self._t3.on_error == "block" and self._defender_mode == "tier3_only" and not on_oversize_explicit:
+        # on_error="block" closes the oversize door too wherever Tier 3 reviews the whole result,
+        # unless on_oversize was chosen.
+        reviews_whole_result = self._defender_mode == "tier3_only" or self._tier3_cascade_review == "result"
+        if self._t3.on_error == "block" and reviews_whole_result and not on_oversize_explicit:
             self._tier3_on_oversize = "scan_anyway"
 
     def warmup_tier2(self) -> None:
@@ -457,29 +507,34 @@ class PromptDefense:
 
     async def _maybe_tier3_cascade(
         self,
+        value: Any,
         tier2: _Tier2Outcome,
         tool_name: str,
         caller: Mapping[str, str],
+        review_flag: dict[str, Any],
         *,
         tier2_has_threat: bool,
         tier2_idx: int,
         tier1_detected: bool,
         tier1_risk: RiskLevel,
-    ) -> tuple[Tier3Result | None, bool | None]:
+    ) -> _CascadeTier3:
         """Cascade escalation: when Tier 2's effective score is in the band, ask Tier 3 about the
-        chunk that drove it. Returns the Tier 3 result and the override: True adds a block, False
-        removes the Tier 2 threat, None keeps Tier 2's verdict."""
+        chunk that drove it, or with cascade_review "result" about the whole result in chunks."""
         if not (self._tier3_enabled and self._defender_mode == "cascade"):
-            return None, None
+            return _CascadeTier3()
         eff = tier2.effective_score
         if eff is None or not tier2.max_sentence:
-            return None, None
+            return _CascadeTier3()
         if eff < self._tier3_band.lower or eff >= self._tier3_band.upper:
-            return None, None
+            return _CascadeTier3()
         t3 = self._t3
         provider = self._resolve_tier3_provider()
         outcome = None
-        if provider is not None:
+        review: _WholeResultReview | None = None
+        if provider is not None and self._tier3_cascade_review == "result":
+            t3.warn_if_risky_override(provider)
+            review = await self._review_whole_result(value, provider, tool_name, "cascade", review_flag, caller)
+        elif provider is not None:
             t3.warn_if_risky_override(provider)
             bounded = truncate(tier2.max_sentence, self._tier3_max_text_length)
             outcome = await t3.call(provider, bounded, self._tier3_ctx(tool_name, "cascade", caller))
@@ -491,19 +546,27 @@ class PromptDefense:
                     "Cascade will skip Tier 3 escalation. Call set_default_tier3_provider() at app startup."
                 )
             t3.emit(Tier3Event(kind="missing_provider", mode="cascade"))
-        verdict = outcome.verdict if outcome is not None and outcome.kind == "verdict" else None
-        # A missing provider is a failure only when the operator asked to fail closed.
-        failed = (outcome is not None and outcome.kind == "failed") or (outcome is None and t3.on_error == "block")
-        if outcome is not None and outcome.kind == "failed":
-            skip_reason = outcome.skip_reason or "Tier 3 skipped"
+        if review is not None:
+            # A whole-result review fails when any chunk failed: an allow then covers only part of it.
+            verdict = review.verdict
+            failed = review.chunk_failures > 0 or review.payload_error
+            skip_reason = review.skip_reason or review.first_chunk_failure or "Tier 3 skipped"
         else:
-            skip_reason = "No Tier 3 provider registered" if outcome is None else "Tier 3 skipped"
+            verdict = outcome.verdict if outcome is not None and outcome.kind == "verdict" else None
+            # A missing provider is a failure only when the operator asked to fail closed.
+            failed = (outcome is not None and outcome.kind == "failed") or (outcome is None and t3.on_error == "block")
+            if outcome is not None and outcome.kind == "failed":
+                skip_reason = outcome.skip_reason or "Tier 3 skipped"
+            else:
+                skip_reason = "No Tier 3 provider registered" if outcome is None else "Tier 3 skipped"
+        verdict_block = verdict is not None and t3.is_block(verdict)
         meta: dict[str, Any] = {"errored": True} if failed else {}
         tier2_score = tier2.raw_score if tier2.raw_score is not None else eff
 
         ask: str | None = None
         via_policy = False
-        if t3.decide is not None:
+        # As in tier3_only, the policy runs only when a whole-result review read something.
+        if t3.decide is not None and (review is None or review.review_ran):
             d = t3.run_decide(
                 Tier3DecisionInput(
                     mode="cascade",
@@ -517,9 +580,12 @@ class PromptDefense:
                     ),
                     tier3=(
                         Tier3DecisionRan(
-                            decision="block" if t3.is_block(verdict) else "allow",
+                            decision="block" if verdict_block else "allow",
                             refused=verdict.refused is True,
                             score=verdict.score,
+                            unreviewed_chunks=(
+                                review.chunk_failures + review.aborted_chunks if review is not None else None
+                            ),
                         )
                         if verdict is not None
                         else Tier3DecisionNotRan(errored=failed, skip_reason=skip_reason)
@@ -532,8 +598,8 @@ class PromptDefense:
                 ask = d
             meta["decided_by"] = "policy" if via_policy else "options"
         if not via_policy:
-            if verdict is not None:
-                ask = "block" if t3.is_block(verdict) else "allow"
+            if verdict_block:
+                ask = "block"
             elif failed:
                 on_error = t3.on_error or "tier2"
                 if on_error == "allow":
@@ -541,6 +607,38 @@ class PromptDefense:
                 # Fail closed only on payloads Tier 2 already flagged, so an outage can't block the band.
                 elif on_error == "block" and tier2_idx >= _RISK_LEVELS.index("medium"):
                     ask = "block"
+            elif verdict is not None:
+                ask = "allow"
+        # on_oversize governs a whole-result review's unreviewed content, whatever the policy says.
+        notes: list[str] = []
+        if review is not None and review.oversize_block:
+            ask = "block"
+            notes.append(skip_reason)
+        elif (
+            review is not None
+            and review.overflow_chunks is not None
+            and ask != "block"
+            and self._tier3_on_oversize == "scan_anyway"
+        ):
+            ask = "block"
+            skip_reason = (
+                f"Tool result exceeds review ceiling; {review.overflow_chunks} chunks scanned, overflow unreviewed"
+            )
+            notes.append(skip_reason)
+        elif review is not None and review.oversize and ask == "allow":
+            # The flagged text may sit in content Tier 3 never saw, so its allow can't clear Tier 2.
+            ask = None
+            notes.append(
+                f"Tool result exceeds review ceiling; {review.overflow_chunks or 0} chunks scanned, "
+                "Tier 2's verdict stands"
+            )
+        if verdict is not None and review is not None and review.chunk_failures > 0:
+            failed_note = f"{review.chunk_failures} of {review.chunk_total} chunks failed"
+            notes.append(
+                f"{failed_note}: {review.first_chunk_failure}" if review.first_chunk_failure else failed_note
+            )
+        if verdict is not None and notes:
+            meta["note"] = "; ".join(notes)
         override_block: bool | None = None
         if ask == "block":
             override_block = True
@@ -555,7 +653,13 @@ class PromptDefense:
         result: Tier3Result = (
             replace(verdict, **meta) if verdict is not None else Tier3Skip(skip_reason=skip_reason, **meta)
         )
-        return result, override_block
+        return _CascadeTier3(
+            result=result,
+            override_block=override_block,
+            chunk_summary=review.chunk_summary if review is not None else None,
+            payload_error=review is not None and review.payload_error,
+            aborted_chunks=review.aborted_chunks if review is not None else 0,
+        )
 
     @staticmethod
     def _finalize_allowed_and_risk(
@@ -591,15 +695,18 @@ class PromptDefense:
         return risk_level, allowed
 
 
-    async def _run_tier3_only(
+    async def _review_whole_result(
         self,
         value: Any,
         provider: Tier3Provider,
         tool_name: str,
+        mode: DefenderMode,
         depth_flag: dict[str, Any],
-        start_time: float,
         caller: Mapping[str, str],
-    ) -> DefenseResult:
+    ) -> _WholeResultReview:
+        """Tier 3 review of the whole tool result, shared by tier3_only and cascade's
+        ``cascade_review="result"``. Applies on_oversize's pre-review policies; the caller applies
+        scan_anyway to the unreviewed overflow (``overflow_chunks``) once its own decision is known."""
         # ENG-2455: record-oriented `field: value` input, so bare values keep field context.
         # ENG-1339: serialize up to a coverage ceiling, chunk it, and review every chunk in parallel
         # (union of blocks) instead of truncating: a fixed truncation point is easy to evade.
@@ -663,7 +770,7 @@ class PromptDefense:
                 if stop is not None and t3.is_block(v):
                     stop.set()
 
-            base_ctx = self._tier3_ctx(tool_name, "tier3_only", caller)
+            base_ctx = self._tier3_ctx(tool_name, mode, caller)
             outcomes = await asyncio.gather(
                 *(
                     t3.call(
@@ -721,6 +828,37 @@ class PromptDefense:
                 depth_flag["coverage_degraded"] = True
                 # The overflow went unreviewed; on_oversize decides it once the final outcome is known.
                 overflow_chunks = chunk_total
+
+        return _WholeResultReview(
+            verdict=verdict,
+            skip_reason=skip_reason,
+            oversize_block=oversize_block,
+            chunk_summary=chunk_summary,
+            payload_error=payload_error,
+            review_ran=review_ran,
+            chunk_failures=chunk_failures,
+            chunk_total=chunk_total,
+            first_chunk_failure=first_chunk_failure,
+            aborted_chunks=aborted_chunks,
+            overflow_chunks=overflow_chunks,
+            oversize=oversize,
+        )
+
+    async def _run_tier3_only(
+        self,
+        value: Any,
+        provider: Tier3Provider,
+        tool_name: str,
+        depth_flag: dict[str, Any],
+        start_time: float,
+        caller: Mapping[str, str],
+    ) -> DefenseResult:
+        t3 = self._t3
+        review = await self._review_whole_result(value, provider, tool_name, "tier3_only", depth_flag, caller)
+        verdict, skip_reason, oversize_block = review.verdict, review.skip_reason, review.oversize_block
+        chunk_summary, payload_error, review_ran = review.chunk_summary, review.payload_error, review.review_ran
+        chunk_failures, chunk_total, aborted_chunks = review.chunk_failures, review.chunk_total, review.aborted_chunks
+        first_chunk_failure, overflow_chunks = review.first_chunk_failure, review.overflow_chunks
 
         # Tier 1 runs for `detections` metadata only (the LLM decides in tier3_only). Its walk is
         # uncapped, so a failure here degrades coverage but doesn't override a verdict.
@@ -938,10 +1076,13 @@ class PromptDefense:
                 and tier2.effective_score >= self._config.tier2.high_risk_threshold
             )
 
-        tier3_result, tier3_override_block = await self._maybe_tier3_cascade(
+        review_flag: dict[str, Any] = {"hit": False}
+        cascade = await self._maybe_tier3_cascade(
+            value,
             tier2,
             tool_name,
             caller,
+            review_flag,
             tier2_has_threat=tier2_has_threat,
             tier2_idx=tier2_idx,
             tier1_detected=bool(detections or tier1_flagged),
@@ -956,10 +1097,10 @@ class PromptDefense:
             tier1_idx=tier1_idx,
             risk_level=risk_level,
             block_high_risk=self._config.block_high_risk,
-            tier3_override_block=tier3_override_block,
+            tier3_override_block=cascade.override_block,
         )
-        # A payload Tier 2 couldn't read fails closed in strict mode.
-        if tier2.payload_error and self._config.block_high_risk:
+        # A payload Tier 2 or a whole-result Tier 3 review couldn't read fails closed in strict mode.
+        if (tier2.payload_error or cascade.payload_error) and self._config.block_high_risk:
             allowed = False
 
         # sanitized is a sentence-cleaned copy of the detect-only payload's high-risk
@@ -981,9 +1122,9 @@ class PromptDefense:
             tier2_multihead_blocked=tier2.multihead_blocked,
             tier2_skip_reason=tier2.skip_reason,
             max_sentence=tier2.max_sentence,
-            tier3=tier3_result,
+            tier3=cascade.result,
             fields_dropped=fields_dropped,
-            truncated_at_depth=depth_flag["hit"] or None,
+            truncated_at_depth=depth_flag["hit"] or review_flag["hit"] or None,
             latency_ms=(time.perf_counter() - start_time) * 1000,
             phase_timings=tier2.phase_timings,
             tier2_stats=tier2.tier2_stats,
@@ -992,8 +1133,14 @@ class PromptDefense:
             tier2_available=tier2.tier2_available,
             coverage_degraded=self._coverage_degraded(sanitized.metadata, depth_flag)
             or tier2.payload_error
+            or cascade.payload_error
+            or review_flag["hit"]
+            or review_flag.get("coverage_degraded")
+            # Chunks aborted by stop_on_first_block went unreviewed; that only matters if the call is allowed.
+            or (allowed and cascade.aborted_chunks > 0)
             or clean_failed
             or None,
+            tier3_chunk_summary=cascade.chunk_summary,
         )
 
     def _defend_tool_result_sync(

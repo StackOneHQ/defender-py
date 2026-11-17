@@ -91,7 +91,7 @@ class Tier3Verdict:
     latency_ms: float | None = None
     usage: Tier3TokenUsage | None = None
     # Set by the defender, never by a provider (like override_applied, override_suppressed, decided_by).
-    # A real Tier 3 failure: some tier3_only chunk failed, or the cascade call failed.
+    # A real Tier 3 failure: a chunk of a whole-result review failed, or the cascade call failed.
     errored: bool | None = None
     # Why the outcome isn't this verdict's alone (an oversize policy block, failed chunks). Redacted.
     note: str | None = None
@@ -170,7 +170,7 @@ class Tier3DecisionRan:
     decision: Tier3Decision
     refused: bool
     score: float | None = None
-    # tier3_only: chunks that failed or were aborted by stop_on_first_block.
+    # Whole-result reviews: chunks that failed or were aborted by stop_on_first_block.
     unreviewed_chunks: int | None = None
     ran: Literal[True] = True
 
