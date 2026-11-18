@@ -60,6 +60,19 @@ def _risk_ladder(current: RiskLevel, suggested: RiskLevel) -> RiskLevel:
     return current
 
 
+# Characters of context on each side that make an occurrence in a copy the same as one in the raw text.
+_OCCURRENCE_CONTEXT = 16
+
+
+def _has_occurrence_not_in(copy: str, raw: str, k: str) -> bool:
+    """Whether some occurrence of ``k`` in ``copy``, with its context, isn't in ``raw``."""
+    i = copy.find(k)
+    while i >= 0:
+        if copy[max(0, i - _OCCURRENCE_CONTEXT) : i + len(k) + _OCCURRENCE_CONTEXT] not in raw:
+            return True
+        i = copy.find(k, i + len(k))
+    return False
+
 class ToolResultSanitizer:
     """Detect threats in a tool result and return the original content unchanged."""
 
@@ -377,8 +390,8 @@ class ToolResultSanitizer:
     @staticmethod
     def _record_tier1_match(metadata: SanitizationMetadata, text: str, matches: list[PatternMatch]) -> None:
         """Record what Tier 1 matched, for the Tier 2 gate. Tier 1's normalised copy (leet, split or
-        joined words) can hold occurrences of a phrase the raw text doesn't, so Tier 2 also gets that
-        copy."""
+        joined words) can hold occurrences of a phrase the raw text doesn't. When any occurrence in the
+        copy, with its context, isn't in the raw text, Tier 2 also gets that copy."""
         metadata.tier1_match_texts.append(text)
         keys: list[str] = []
         for phrase in dict.fromkeys(m.matched for m in matches):
@@ -391,7 +404,7 @@ class ToolResultSanitizer:
         raw = phrase_key(text)
         for copy in dict.fromkeys(tier1_analysis_copy(text, alternate) for alternate in (False, True)):
             key = phrase_key(copy)
-            if copy != text and any(key.count(k) > raw.count(k) for k in keys):
+            if copy != text and any(_has_occurrence_not_in(key, raw, k) for k in keys):
                 metadata.tier1_normalised_copies.append((text, copy))
 
     def _detect_in_key(self, key: str, key_path: str, context: SanitizationContext, metadata: SanitizationMetadata) -> None:

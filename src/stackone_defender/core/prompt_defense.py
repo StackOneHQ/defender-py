@@ -74,10 +74,9 @@ def _all_phrases_read(
     chunks_by_text: dict[str, list[str]],
 ) -> bool:
     """Whether Tier 2 read each matched phrase where Tier 1 found it: every occurrence in the source
-    text sits whole in one of that text's own chunks, and so does every occurrence in a normalised
-    copy that holds more of them than the source. So the same phrase quoted in another field or
-    sentence, or once literally next to a split or leet occurrence, doesn't count. An empty phrase
-    is unread."""
+    text sits whole in one of that text's own chunks, and so does every occurrence in each normalised
+    copy Tier 2 scored. So the same phrase quoted in another field or sentence, or once literally next
+    to a split or leet occurrence, doesn't count. An empty phrase is unread."""
     keys: dict[str, str] = {}
 
     def key(s: str) -> str:
@@ -110,7 +109,7 @@ def _all_phrases_read(
         if found and not covered(of, k):
             return False
         for o, text in copies:
-            if o != of or key(text).count(k) <= raw_count:
+            if o != of or key(text).count(k) == 0:
                 continue
             found = True
             if not covered(text, k):
