@@ -311,7 +311,7 @@ class _Meter:
         return True
 
 
-def _decode_for_review(s: str) -> str:
+def decode_for_review(s: str) -> str:
     """A string as Tier 3 reads it: encoded spans (base64, hex, URL, entities..., chained) decoded, from
     the same head Tier 1 and Tier 2 decode (UTF-16 units). ROT13 and ROT47 are left alone: they rewrite
     the whole string, so plain text with one ROT13 word would reach the reviewer scrambled. Tier 1 and
@@ -352,7 +352,7 @@ class _Serializer:
         max_chars: int,
         max_size: int,
         drop_shape_only: bool = False,
-        text: Callable[[str], str] = _decode_for_review,
+        text: Callable[[str], str] = decode_for_review,
     ):
         self.depth_flag = depth_flag
         self.text = text
@@ -577,7 +577,7 @@ def format_records_for_tier3(
     def text(s: str) -> str:
         t = cache.get(s)
         if t is None:
-            t = cache[s] = _decode_for_review(s)
+            t = cache[s] = decode_for_review(s)
         return t
 
     ser = _Serializer(depth_flag, max_chars, max_size, drop_shape_only, text)

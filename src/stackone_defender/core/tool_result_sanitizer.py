@@ -372,7 +372,11 @@ class ToolResultSanitizer:
         return self._maybe_wrap(value, context)
 
     def _scan_decoded(
-        self, analysis_value: str, context: SanitizationContext, metadata: SanitizationMetadata
+        self,
+        analysis_value: str,
+        context: SanitizationContext,
+        metadata: SanitizationMetadata,
+        cumulative: bool = True,
     ) -> tuple[list[str], RiskLevel] | None:
         """Decode an encoded value (base64, hex, ROT13..., chained) and run the pattern detector on the
         decoded text. Evidence-driven: a decode counts only when it trips a real attack pattern, so a
@@ -385,7 +389,7 @@ class ToolResultSanitizer:
             return None
         patterns = list(dict.fromkeys(m.pattern for m in enc.matches))
         self._record_tier1_match(metadata, decoded, enc.matches)
-        if context.cumulative_risk:
+        if cumulative and context.cumulative_risk:
             self._update_cumulative_risk(context.cumulative_risk, enc.suggested_risk, patterns)
         return patterns, enc.suggested_risk
 
@@ -420,7 +424,9 @@ class ToolResultSanitizer:
         if not detect or not self._use_tier1:
             return
         cap = self._max_field_analysis_length
-        enc = self._scan_decoded(truncate(value, cap), context, metadata)
+        # Only this field escalates: these fields aren't counted as processed in the cumulative tracker,
+        # so feeding it their matches would skew its fractions.
+        enc = self._scan_decoded(truncate(value, cap), context, metadata, cumulative=False)
         if enc is not None:
             patterns, risk = enc
             self._record_field_detections(metadata, context, _risk_ladder(context.risk_level, risk), patterns, True)

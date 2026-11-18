@@ -51,7 +51,13 @@ from ..utils.boundary import generate_data_boundary
 from ..utils.redact import describe_error, redact_error_text
 from ..utils.text import phrase_key, truncate
 from .sentence_cleaner import clean_high_risk_content
-from .tier3_input import DEFAULT_MAX_CHUNKS, chunk_tier3_input, content_budget, format_records_for_tier3
+from .tier3_input import (
+    DEFAULT_MAX_CHUNKS,
+    chunk_tier3_input,
+    content_budget,
+    decode_for_review,
+    format_records_for_tier3,
+)
 from .tier3_policy import MISSING_PROVIDER, Tier3Policy
 from .tool_result_sanitizer import ToolResultSanitizer, create_tool_result_sanitizer
 
@@ -601,7 +607,8 @@ class PromptDefense:
             review = await self._review_whole_result(value, provider, tool_name, "cascade", review_flag, caller)
         elif provider is not None:
             t3.warn_if_risky_override(provider)
-            bounded = truncate(tier2.max_sentence, self._tier3_max_text_length)
+            # The chunk can be an encoded copy Tier 2 also scored; the reviewer reads it decoded.
+            bounded = truncate(decode_for_review(tier2.max_sentence), self._tier3_max_text_length)
             outcome = await t3.call(provider, bounded, self._tier3_ctx(tool_name, "cascade", caller))
         else:
             if not self._tier3_missing_provider_warned:
