@@ -43,7 +43,7 @@ from ..utils.structure import (
     should_continue_traversal,
     update_size_metrics,
 )
-from ..utils.text import phrase_key
+from ..utils.text import phrase_key, to_utf16
 
 # Risk levels in ascending order, for monotonic max comparison.
 RISK_ORDER: list[RiskLevel] = ["low", "medium", "high", "critical"]
@@ -65,7 +65,9 @@ _OCCURRENCE_CONTEXT = 16
 
 
 def _has_occurrence_not_in(copy: str, raw: str, k: str) -> bool:
-    """Whether some occurrence of ``k`` in ``copy``, with its context, isn't in ``raw``."""
+    """Whether some occurrence of ``k`` in ``copy``, with its context, isn't in ``raw``. Context is
+    counted in UTF-16 units, as in TS."""
+    copy, raw, k = to_utf16(copy), to_utf16(raw), to_utf16(k)
     i = copy.find(k)
     while i >= 0:
         if copy[max(0, i - _OCCURRENCE_CONTEXT) : i + len(k) + _OCCURRENCE_CONTEXT] not in raw:
