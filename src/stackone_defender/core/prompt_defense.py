@@ -823,7 +823,9 @@ class PromptDefense:
         ceiling = self._tier3_max_chunks * content_budget(per_chunk)
         joined = ""
         try:
-            joined = format_records_for_tier3(value, depth_flag, ceiling, self._config.traversal.max_size)
+            joined = format_records_for_tier3(
+                value, depth_flag, ceiling, self._config.traversal.max_size, self._t3.drop_shape_only_fields
+            )
         except Exception as e:
             payload_error = True
             skip_reason = f"Tier 3 serialization error: {redact_error_text(describe_error(e))}"

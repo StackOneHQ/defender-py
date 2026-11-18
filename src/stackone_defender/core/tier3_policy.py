@@ -89,6 +89,7 @@ class Tier3Policy:
         self.timeout_ms: float | None = None
         self.max_concurrency: int | None = None
         self.stop_on_first_block = False
+        self.drop_shape_only_fields = False
         self.on_event: Callable[[Tier3Event], Any] | None = None
         self.include_raw = True
         self._missing_score_warned = False
@@ -161,6 +162,7 @@ class Tier3Policy:
                 "settles holds its slot forever and queued calls wait with it. Set timeout_ms."
             )
         self.stop_on_first_block = _opt(opts, "stop_on_first_block", "stopOnFirstBlock") is True
+        self.drop_shape_only_fields = _opt(opts, "drop_shape_only_fields", "dropShapeOnlyFields") is True
         on_event = _opt(opts, "on_event", "onEvent")
         if callable(on_event):
             self.on_event = on_event
