@@ -98,8 +98,12 @@ def detect_encoding(
     return result
 
 
-def _b64decode_url_safe(candidate: str) -> str | None:
-    """Decode standard or URL-safe base64; None when it isn't valid base64."""
+_NOT_TEXT = object()  # valid base64 of bytes that aren't UTF-8 text
+
+
+def _b64decode_url_safe(candidate: str) -> str | object | None:
+    """Decode standard or URL-safe base64 to UTF-8 text. ``_NOT_TEXT`` when it is valid base64 but not
+    valid UTF-8 (binary data); None when it isn't valid base64."""
     try:
         # Pad to a multiple of 4; b64decode rejects unpadded input (JS atob tolerates it).
         unpadded = candidate.replace("-", "+").replace("_", "/").rstrip("=")
@@ -107,19 +111,24 @@ def _b64decode_url_safe(candidate: str) -> str | None:
     except Exception:
         return None
     try:
-        return decoded_bytes.decode("ascii")
+        # Strict UTF-8; a leading BOM is kept, as in TS (TextDecoder with ignoreBOM). Control
+        # characters other than JavaScript's \s ones become spaces, so a NUL appended to an encoded
+        # instruction can't keep it encoded.
+        return _CONTROL_CHARS.sub(" ", decoded_bytes.decode("utf-8"))
     except UnicodeDecodeError:
-        return decoded_bytes.decode("latin-1", errors="replace")
+        return _NOT_TEXT
 
 
-# Whitespace JavaScript's \s matches, so decodes are kept exactly as in the TS package.
-_JS_WHITESPACE = frozenset(
-    "\t\n\v\f\r \u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff" + "".join(chr(c) for c in range(0x2000, 0x200B))
-)
+# Control characters other than JavaScript's \s ones (tab, LF, VT, FF, CR), as in TS.
+_CONTROL_CHARS = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
+# JavaScript's \S: anything but its whitespace set.
+_JS_NON_SPACE = re.compile("[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]")
 
 
-def _is_printable_text(s: str | None) -> bool:
-    return bool(s) and all(0x20 <= ord(c) <= 0x7E or c in _JS_WHITESPACE for c in s)
+def _is_printable_text(s: object) -> bool:
+    """Text, not binary: valid UTF-8 (``_b64decode_url_safe`` returns ``_NOT_TEXT`` otherwise) with
+    something other than whitespace in it, as in TS. Any Unicode character counts."""
+    return isinstance(s, str) and _JS_NON_SPACE.search(s) is not None
 
 
 # Retries per candidate when a word joined by - or _ makes the whole run undecodable.
@@ -589,7 +598,7 @@ def decode_all_encoding(text: str) -> str:
     return result.processed_text or text
 
 
-def decode_all_levels(text: str, max_iterations: int = 5) -> tuple[str, int]:
+def decode_all_levels(text: str, max_iterations: int = 5, options: dict[str, bool] | None = None) -> tuple[str, int]:
     """Iteratively decode chained encodings until the output stabilises.
 
     A single call to ``decode_all_encoding`` only unwraps one layer. Chained
@@ -602,6 +611,8 @@ def decode_all_levels(text: str, max_iterations: int = 5) -> tuple[str, int]:
     - Aborts if decoded text exceeds 10x the original length (decompression
       bomb protection).
 
+    ``options`` passes detector flags (e.g. ``{"decode_rot13": False}``) to every pass.
+
     Returns ``(decoded_text, levels)`` where ``levels`` is the number of
     decode passes applied (0 if the input had no detected encodings).
     """
@@ -612,7 +623,7 @@ def decode_all_levels(text: str, max_iterations: int = 5) -> tuple[str, int]:
     current = text
     levels = 0
     for _ in range(max_iterations):
-        result = detect_encoding(current, action="decode")
+        result = detect_encoding(current, action="decode", **(options or {}))
         if not result.processed_text or result.processed_text == current:
             break
         if len(result.processed_text) > max_length:

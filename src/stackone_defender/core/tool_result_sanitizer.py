@@ -43,7 +43,7 @@ from ..utils.structure import (
     should_continue_traversal,
     update_size_metrics,
 )
-from ..utils.text import phrase_key, to_utf16
+from ..utils.text import phrase_key, to_utf16, truncate
 
 # Risk levels in ascending order, for monotonic max comparison.
 RISK_ORDER: list[RiskLevel] = ["low", "medium", "high", "critical"]
@@ -189,6 +189,7 @@ class ToolResultSanitizer:
             if self._is_field_risky(context.field_name, context.tool_name):
                 return self._sanitize_string_field(value, context, metadata, detect)
             update_size_metrics(metadata.size_metrics, value)
+            self._scan_encoded_field(value, context, metadata, detect)
             return value
         update_size_metrics(metadata.size_metrics, value)
         if not should_continue_traversal(metadata.size_metrics, depth, self._traversal.max_size, self._traversal.max_depth):
@@ -346,8 +347,9 @@ class ToolResultSanitizer:
 
         if self._use_tier1:
             cap = self._max_field_analysis_length
-            analysis_value = value[:cap] if len(value) > cap else value
-            if len(value) > cap:
+            # The cap counts UTF-16 units, as in TS.
+            analysis_value = truncate(value, cap)
+            if analysis_value != value:
                 metadata.analysis_truncated = True
 
             result = self._pattern_detector.analyze(analysis_value)
@@ -359,37 +361,75 @@ class ToolResultSanitizer:
                 if context.cumulative_risk and result.matches:
                     self._update_cumulative_risk(context.cumulative_risk, result.suggested_risk, tier1_patterns)
 
-            # Evidence-driven encoding escalation: decode chained layers, then run
-            # the REAL pattern detector on the decoded text. Escalate only when the
-            # decoded content trips an actual attack pattern (a benign base64 body
-            # containing the word "ignore" is NOT a false positive).
-            decoded, levels = decode_all_levels(analysis_value)
-            if levels > 0 and decoded != analysis_value:
-                enc = self._pattern_detector.analyze(decoded)
-                if enc.has_detections and enc.matches:
-                    enc_patterns = [m.pattern for m in enc.matches]
-                    tier1_patterns = list(dict.fromkeys(tier1_patterns + enc_patterns))
-                    escalated_from_encoding = True
-                    self._record_tier1_match(metadata, decoded, enc.matches)
-                    risk_level = _risk_ladder(risk_level, enc.suggested_risk)
-                    if context.cumulative_risk:
-                        self._update_cumulative_risk(context.cumulative_risk, enc.suggested_risk, enc_patterns)
+            enc = self._scan_decoded(analysis_value, context, metadata)
+            if enc is not None:
+                enc_patterns, enc_risk = enc
+                tier1_patterns = list(dict.fromkeys(tier1_patterns + enc_patterns))
+                escalated_from_encoding = True
+                risk_level = _risk_ladder(risk_level, enc_risk)
 
-        # Fold this field's risk into the overall (monotonic; no-op for benign low).
-        self._raise_overall_risk(metadata, risk_level)
-
-        if tier1_patterns or escalated_from_encoding:
-            metadata.fields_sanitized.append(context.path)
-            methods: list = []
-            if tier1_patterns:
-                methods.append("pattern_removal")
-            if escalated_from_encoding:
-                methods.append("encoding_detection")
-            metadata.methods_by_field[context.path] = methods
-            if tier1_patterns:
-                metadata.patterns_removed_by_field[context.path] = tier1_patterns
-
+        self._record_field_detections(metadata, context, risk_level, tier1_patterns, escalated_from_encoding)
         return self._maybe_wrap(value, context)
+
+    def _scan_decoded(
+        self,
+        analysis_value: str,
+        context: SanitizationContext,
+        metadata: SanitizationMetadata,
+        cumulative: bool = True,
+    ) -> tuple[list[str], RiskLevel] | None:
+        """Decode an encoded value (base64, hex, ROT13..., chained) and run the pattern detector on the
+        decoded text. Evidence-driven: a decode counts only when it trips a real attack pattern, so a
+        benign base64 body that merely contains the word "ignore" isn't flagged."""
+        decoded, levels = decode_all_levels(analysis_value)
+        if levels == 0 or decoded == analysis_value:
+            return None
+        enc = self._pattern_detector.analyze(decoded)
+        if not enc.has_detections or not enc.matches:
+            return None
+        patterns = list(dict.fromkeys(m.pattern for m in enc.matches))
+        self._record_tier1_match(metadata, decoded, enc.matches)
+        if cumulative and context.cumulative_risk:
+            self._update_cumulative_risk(context.cumulative_risk, enc.suggested_risk, patterns)
+        return patterns, enc.suggested_risk
+
+    def _record_field_detections(
+        self,
+        metadata: SanitizationMetadata,
+        context: SanitizationContext,
+        risk_level: RiskLevel,
+        patterns: list[str],
+        from_encoding: bool,
+    ) -> None:
+        """Raise the overall risk and record which patterns and methods fired on this field."""
+        self._raise_overall_risk(metadata, risk_level)
+        if not patterns and not from_encoding:
+            return
+        metadata.fields_sanitized.append(context.path)
+        methods: list = []
+        if patterns:
+            methods.append("pattern_removal")
+        if from_encoding:
+            methods.append("encoding_detection")
+        metadata.methods_by_field[context.path] = methods
+        if patterns:
+            metadata.patterns_removed_by_field[context.path] = patterns
+
+    def _scan_encoded_field(
+        self, value: str, context: SanitizationContext, metadata: SanitizationMetadata, detect: bool
+    ) -> None:
+        """A field that isn't risky by name isn't pattern-scanned, but an encoded value in it is decoded
+        and scanned (ENG-4342): an attack can hide in any field as base64, e.g. a Gmail body in
+        ``payload.body.data``."""
+        if not detect or not self._use_tier1:
+            return
+        cap = self._max_field_analysis_length
+        # Only this field escalates: these fields aren't counted as processed in the cumulative tracker,
+        # so feeding it their matches would skew its fractions.
+        enc = self._scan_decoded(truncate(value, cap), context, metadata, cumulative=False)
+        if enc is not None:
+            patterns, risk = enc
+            self._record_field_detections(metadata, context, _risk_ladder(context.risk_level, risk), patterns, True)
 
     @staticmethod
     def _record_tier1_match(metadata: SanitizationMetadata, text: str, matches: list[PatternMatch]) -> None:
@@ -416,8 +456,8 @@ class ToolResultSanitizer:
         if not self._use_tier1 or len(key) < 3:
             return
         cap = self._max_field_analysis_length
-        analysis_key = key[:cap] if len(key) > cap else key
-        if len(key) > cap:
+        analysis_key = truncate(key, cap)
+        if analysis_key != key:
             metadata.analysis_truncated = True
         result = self._pattern_detector.analyze(analysis_key)
         if not result.has_detections or not result.matches:
