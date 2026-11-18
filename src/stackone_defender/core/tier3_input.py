@@ -387,7 +387,7 @@ class _Serializer:
             return
         if v is None or (under_key and _is_empty_value(v)):
             # A plain path set to null carries no text. Empty values (`key:`) stay, as in the measured rule.
-            if self.drop_shape_only and v is None and _is_field_path(prefix):
+            if self.drop_shape_only and under_key and v is None and _is_field_path(prefix):
                 return
             # Keep the key: `{"<text>": null}` / `""` / `{}` / `[]` must not hide `<text>`.
             if under_key:
@@ -468,8 +468,9 @@ class _Serializer:
                 else:
                     break
             return
-        # Single-line values only: a bare number or date inside a multi-line text value stays.
-        if self.drop_shape_only and _is_field_path(prefix) and not _LINE_BREAKS.search(s) and _is_shape_only(s):
+        # Single-line values under an object key only: a bare number or date inside a multi-line text
+        # value, or a top-level array element, stays.
+        if self.drop_shape_only and under_key and _is_field_path(prefix) and not _LINE_BREAKS.search(s) and _is_shape_only(s):
             if is_str:
                 self.emitted_string_chars += len(s)  # left out on purpose: covered, not truncated
             return
