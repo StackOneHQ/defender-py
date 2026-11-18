@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.6](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.5...stackone-defender-v0.9.6) (2026-11-18)
+
+
+### Features
+
+* **ENG-3692:** let cascade's Tier 3 review the whole result ([#77](https://github.com/StackOneHQ/defender-py/issues/77)) ([11f4205](https://github.com/StackOneHQ/defender-py/commit/11f42058e09fd27ccc9ff91078b2f5199a873cbc))
+* **ENG-4207:** block on Tier 1 only when Tier 2 agrees ([#79](https://github.com/StackOneHQ/defender-py/issues/79)) ([718ed47](https://github.com/StackOneHQ/defender-py/commit/718ed472f4030c91df22d1fdb7984b78e95239a7))
+* **ENG-4342:** decode UTF-8 encoded values in every field, for every tier ([#82](https://github.com/StackOneHQ/defender-py/issues/82)) ([a636865](https://github.com/StackOneHQ/defender-py/commit/a636865ba93f0a3a038b4ad779fb413ce85f001f))
+* **ENG-4364:** opt-in tier3 drop_shape_only_fields for whole-result reviews ([#81](https://github.com/StackOneHQ/defender-py/issues/81)) ([f280861](https://github.com/StackOneHQ/defender-py/commit/f2808614672ebdd94d70ccf83774c6508044c503))
+
+
+### Bug Fixes
+
+* **ENG-4207:** check occurrences only Tier 1's normalised copy holds ([#80](https://github.com/StackOneHQ/defender-py/issues/80)) ([3b2f988](https://github.com/StackOneHQ/defender-py/commit/3b2f9888dadc6a2ef1cb5f4da5847f30c248f26d))
+
 ## [0.9.5](https://github.com/StackOneHQ/defender-py/compare/stackone-defender-v0.9.4...stackone-defender-v0.9.5) (2026-11-13)
 
 
