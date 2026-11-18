@@ -111,20 +111,24 @@ def _b64decode_url_safe(candidate: str) -> str | object | None:
     except Exception:
         return None
     try:
-        # Strict UTF-8; a leading BOM is kept, as in TS (TextDecoder with ignoreBOM).
-        return decoded_bytes.decode("utf-8")
+        # Strict UTF-8; a leading BOM is kept, as in TS (TextDecoder with ignoreBOM). Control
+        # characters other than JavaScript's \s ones become spaces, so a NUL appended to an encoded
+        # instruction can't keep it encoded.
+        return _CONTROL_CHARS.sub(" ", decoded_bytes.decode("utf-8"))
     except UnicodeDecodeError:
         return _NOT_TEXT
 
 
 # Control characters other than JavaScript's \s ones (tab, LF, VT, FF, CR), as in TS.
 _CONTROL_CHARS = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
+# JavaScript's \S: anything but its whitespace set.
+_JS_NON_SPACE = re.compile("[^\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]")
 
 
 def _is_printable_text(s: object) -> bool:
-    """Text, not binary: non-empty, with no control characters other than tab, LF, VT, FF and CR. Any
-    other Unicode character counts, so accented letters, dashes and curly quotes keep the decode."""
-    return isinstance(s, str) and len(s) > 0 and not _CONTROL_CHARS.search(s)
+    """Text, not binary: valid UTF-8 (``_b64decode_url_safe`` returns ``_NOT_TEXT`` otherwise) with
+    something other than whitespace in it, as in TS. Any Unicode character counts."""
+    return isinstance(s, str) and _JS_NON_SPACE.search(s) is not None
 
 
 # Retries per candidate when a word joined by - or _ makes the whole run undecodable.
@@ -594,7 +598,7 @@ def decode_all_encoding(text: str) -> str:
     return result.processed_text or text
 
 
-def decode_all_levels(text: str, max_iterations: int = 5) -> tuple[str, int]:
+def decode_all_levels(text: str, max_iterations: int = 5, options: dict[str, bool] | None = None) -> tuple[str, int]:
     """Iteratively decode chained encodings until the output stabilises.
 
     A single call to ``decode_all_encoding`` only unwraps one layer. Chained
@@ -607,6 +611,8 @@ def decode_all_levels(text: str, max_iterations: int = 5) -> tuple[str, int]:
     - Aborts if decoded text exceeds 10x the original length (decompression
       bomb protection).
 
+    ``options`` passes detector flags (e.g. ``{"decode_rot13": False}``) to every pass.
+
     Returns ``(decoded_text, levels)`` where ``levels`` is the number of
     decode passes applied (0 if the input had no detected encodings).
     """
@@ -617,7 +623,7 @@ def decode_all_levels(text: str, max_iterations: int = 5) -> tuple[str, int]:
     current = text
     levels = 0
     for _ in range(max_iterations):
-        result = detect_encoding(current, action="decode")
+        result = detect_encoding(current, action="decode", **(options or {}))
         if not result.processed_text or result.processed_text == current:
             break
         if len(result.processed_text) > max_length:

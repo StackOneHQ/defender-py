@@ -1476,7 +1476,7 @@ class PromptDefense:
         origin: list[int] = []
         for i in range(len(strings)):
             origin.append(i)
-            head = strings[i][:DEFAULT_MAX_FIELD_ANALYSIS_LENGTH]
+            head = truncate(strings[i], DEFAULT_MAX_FIELD_ANALYSIS_LENGTH)  # UTF-16 units, as in TS
             decoded, levels = decode_all_levels(head)
             if levels > 0 and decoded != head:
                 strings.append(decoded)

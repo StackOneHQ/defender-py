@@ -43,7 +43,7 @@ from ..utils.structure import (
     should_continue_traversal,
     update_size_metrics,
 )
-from ..utils.text import phrase_key, to_utf16
+from ..utils.text import phrase_key, to_utf16, truncate
 
 # Risk levels in ascending order, for monotonic max comparison.
 RISK_ORDER: list[RiskLevel] = ["low", "medium", "high", "critical"]
@@ -347,8 +347,9 @@ class ToolResultSanitizer:
 
         if self._use_tier1:
             cap = self._max_field_analysis_length
-            analysis_value = value[:cap] if len(value) > cap else value
-            if len(value) > cap:
+            # The cap counts UTF-16 units, as in TS.
+            analysis_value = truncate(value, cap)
+            if analysis_value != value:
                 metadata.analysis_truncated = True
 
             result = self._pattern_detector.analyze(analysis_value)
@@ -419,7 +420,7 @@ class ToolResultSanitizer:
         if not detect or not self._use_tier1:
             return
         cap = self._max_field_analysis_length
-        enc = self._scan_decoded(value[:cap] if len(value) > cap else value, context, metadata)
+        enc = self._scan_decoded(truncate(value, cap), context, metadata)
         if enc is not None:
             patterns, risk = enc
             self._record_field_detections(metadata, context, _risk_ladder(context.risk_level, risk), patterns, True)
@@ -449,8 +450,8 @@ class ToolResultSanitizer:
         if not self._use_tier1 or len(key) < 3:
             return
         cap = self._max_field_analysis_length
-        analysis_key = key[:cap] if len(key) > cap else key
-        if len(key) > cap:
+        analysis_key = truncate(key, cap)
+        if analysis_key != key:
             metadata.analysis_truncated = True
         result = self._pattern_detector.analyze(analysis_key)
         if not result.has_detections or not result.matches:

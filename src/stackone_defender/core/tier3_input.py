@@ -20,7 +20,7 @@ from typing import Any
 
 from ..config import DEFAULT_MAX_FIELD_ANALYSIS_LENGTH, MAX_TRAVERSAL_DEPTH
 from ..sanitizers.encoding_detector import decode_all_levels
-from ..utils.text import JS_WS_CHARS, from_utf16, safe_end, safe_start, to_utf16
+from ..utils.text import JS_WS_CHARS, from_utf16, safe_end, safe_start, to_utf16, truncate
 from ..utils.text import utf16_len as _utf16_len
 
 # Line breaks (incl. U+2028/U+2029/NEL): flattened in keys, split in values, so neither can
@@ -312,10 +312,12 @@ class _Meter:
 
 
 def _decode_for_review(s: str) -> str:
-    """A string as Tier 3 reads it: decoded when it holds encoded text (base64, hex, ROT13..., chained),
-    from the same head Tier 1 and Tier 2 decode. Only the reviewer's copy changes."""
-    head = s[:DEFAULT_MAX_FIELD_ANALYSIS_LENGTH]
-    text, levels = decode_all_levels(head)
+    """A string as Tier 3 reads it: encoded spans (base64, hex, URL, entities..., chained) decoded, from
+    the same head Tier 1 and Tier 2 decode (UTF-16 units). ROT13 and ROT47 are left alone: they rewrite
+    the whole string, so plain text with one ROT13 word would reach the reviewer scrambled. Tier 1 and
+    Tier 2 still decode them. Only the reviewer's copy changes."""
+    head = truncate(s, DEFAULT_MAX_FIELD_ANALYSIS_LENGTH)
+    text, levels = decode_all_levels(head, 5, {"decode_rot13": False, "decode_rot47": False})
     return text + s[len(head) :] if levels > 0 and text != head else s
 
 
