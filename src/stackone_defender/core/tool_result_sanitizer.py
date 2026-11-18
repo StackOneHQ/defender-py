@@ -43,7 +43,7 @@ from ..utils.structure import (
     should_continue_traversal,
     update_size_metrics,
 )
-from ..utils.text import phrase_key
+from ..utils.text import phrase_key, to_utf16
 
 # Risk levels in ascending order, for monotonic max comparison.
 RISK_ORDER: list[RiskLevel] = ["low", "medium", "high", "critical"]
@@ -59,6 +59,23 @@ def _risk_ladder(current: RiskLevel, suggested: RiskLevel) -> RiskLevel:
         return "medium"
     return current
 
+
+# Characters of context on each side that make an occurrence in a copy the same as one in the raw text.
+_OCCURRENCE_CONTEXT = 16
+
+
+def _has_occurrence_not_in(copy: str, raw: str, k: str) -> bool:
+    """Whether some occurrence of ``k`` in ``copy``, with its context, isn't in ``raw``: the copy holds
+    that occurrence-with-context more often than the raw text, so a repeated context can't vouch for
+    it. Context is counted in UTF-16 units, as in TS."""
+    copy, raw, k = to_utf16(copy), to_utf16(raw), to_utf16(k)
+    i = copy.find(k)
+    while i >= 0:
+        around = copy[max(0, i - _OCCURRENCE_CONTEXT) : i + len(k) + _OCCURRENCE_CONTEXT]
+        if copy.count(around) > raw.count(around):
+            return True
+        i = copy.find(k, i + len(k))
+    return False
 
 class ToolResultSanitizer:
     """Detect threats in a tool result and return the original content unchanged."""
@@ -376,22 +393,22 @@ class ToolResultSanitizer:
 
     @staticmethod
     def _record_tier1_match(metadata: SanitizationMetadata, text: str, matches: list[PatternMatch]) -> None:
-        """Record what Tier 1 matched, for the Tier 2 gate. A phrase matched only on Tier 1's
-        normalised copy (leet, split or joined words) isn't in the raw text, so Tier 2 also gets
-        that copy."""
+        """Record what Tier 1 matched, for the Tier 2 gate. Tier 1's normalised copy (leet, split or
+        joined words) can hold occurrences of a phrase the raw text doesn't. When any occurrence in the
+        copy, with its context, isn't in the raw text, Tier 2 also gets that copy."""
         metadata.tier1_match_texts.append(text)
-        raw = phrase_key(text)
-        missing: list[str] = []
+        keys: list[str] = []
         for phrase in dict.fromkeys(m.matched for m in matches):
             metadata.tier1_match_phrases.append((text, phrase))
             k = phrase_key(phrase)
-            if k and k not in raw:
-                missing.append(k)
-        if not missing:
+            if k:
+                keys.append(k)
+        if not keys or not any(m.normalised for m in matches):
             return
+        raw = phrase_key(text)
         for copy in dict.fromkeys(tier1_analysis_copy(text, alternate) for alternate in (False, True)):
             key = phrase_key(copy)
-            if copy != text and any(k in key for k in missing):
+            if copy != text and any(_has_occurrence_not_in(key, raw, k) for k in keys):
                 metadata.tier1_normalised_copies.append((text, copy))
 
     def _detect_in_key(self, key: str, key_path: str, context: SanitizationContext, metadata: SanitizationMetadata) -> None:
