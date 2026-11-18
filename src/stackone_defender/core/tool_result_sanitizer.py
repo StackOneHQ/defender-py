@@ -65,12 +65,14 @@ _OCCURRENCE_CONTEXT = 16
 
 
 def _has_occurrence_not_in(copy: str, raw: str, k: str) -> bool:
-    """Whether some occurrence of ``k`` in ``copy``, with its context, isn't in ``raw``. Context is
-    counted in UTF-16 units, as in TS."""
+    """Whether some occurrence of ``k`` in ``copy``, with its context, isn't in ``raw``: the copy holds
+    that occurrence-with-context more often than the raw text, so a repeated context can't vouch for
+    it. Context is counted in UTF-16 units, as in TS."""
     copy, raw, k = to_utf16(copy), to_utf16(raw), to_utf16(k)
     i = copy.find(k)
     while i >= 0:
-        if copy[max(0, i - _OCCURRENCE_CONTEXT) : i + len(k) + _OCCURRENCE_CONTEXT] not in raw:
+        around = copy[max(0, i - _OCCURRENCE_CONTEXT) : i + len(k) + _OCCURRENCE_CONTEXT]
+        if copy.count(around) > raw.count(around):
             return True
         i = copy.find(k, i + len(k))
     return False
