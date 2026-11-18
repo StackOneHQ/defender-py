@@ -18,7 +18,8 @@ from collections.abc import Set as AbstractSet
 from decimal import Decimal
 from typing import Any
 
-from ..config import MAX_TRAVERSAL_DEPTH
+from ..config import DEFAULT_MAX_FIELD_ANALYSIS_LENGTH, MAX_TRAVERSAL_DEPTH
+from ..sanitizers.encoding_detector import decode_all_levels
 from ..utils.text import JS_WS_CHARS, from_utf16, safe_end, safe_start, to_utf16
 from ..utils.text import utf16_len as _utf16_len
 
@@ -310,7 +311,15 @@ class _Meter:
         return True
 
 
-def _sum_string_content(v: Any, depth: int, meter: _Meter) -> int:
+def _decode_for_review(s: str) -> str:
+    """A string as Tier 3 reads it: decoded when it holds encoded text (base64, hex, ROT13..., chained),
+    from the same head Tier 1 and Tier 2 decode. Only the reviewer's copy changes."""
+    head = s[:DEFAULT_MAX_FIELD_ANALYSIS_LENGTH]
+    text, levels = decode_all_levels(head)
+    return text + s[len(head) :] if levels > 0 and text != head else s
+
+
+def _sum_string_content(v: Any, depth: int, meter: _Meter, text: Callable[[str], str]) -> int:
     """String-leaf content as the serializer emits it (UTF-16 units, line breaks excluded)."""
     if depth > MAX_TRAVERSAL_DEPTH:
         return 0
@@ -318,7 +327,8 @@ def _sum_string_content(v: Any, depth: int, meter: _Meter) -> int:
     if not meter.add(v):
         return 0
     if isinstance(v, str):
-        return _utf16_len(v) - len(_LINE_BREAKS.findall(v))
+        t = text(v)
+        return _utf16_len(t) - len(_LINE_BREAKS.findall(t))
     if _is_array(v):
         items = v
     elif isinstance(v, dict):
@@ -327,15 +337,23 @@ def _sum_string_content(v: Any, depth: int, meter: _Meter) -> int:
         return 0
     total = 0
     for x in items:
-        total += _sum_string_content(x, depth + 1, meter)
+        total += _sum_string_content(x, depth + 1, meter, text)
         if meter.hit:
             break
     return total
 
 
 class _Serializer:
-    def __init__(self, depth_flag: dict[str, Any], max_chars: int, max_size: int, drop_shape_only: bool = False):
+    def __init__(
+        self,
+        depth_flag: dict[str, Any],
+        max_chars: int,
+        max_size: int,
+        drop_shape_only: bool = False,
+        text: Callable[[str], str] = _decode_for_review,
+    ):
         self.depth_flag = depth_flag
+        self.text = text
         self.drop_shape_only = drop_shape_only
         self.max_chars = max_chars
         self.meter = _Meter(max_size)
@@ -444,7 +462,7 @@ class _Serializer:
 
     def _scalar(self, v: Any, prefix: str, lines: list[str], keyed: bool, under_key: bool) -> None:
         is_str = isinstance(v, str)
-        s = to_utf16(v if is_str else _js_string(v))
+        s = to_utf16(self.text(v) if is_str else _js_string(v))
         limit = self.cap if is_str else min(self.cap, self.non_string_cap)
         if not prefix and not keyed:
             # Top-level scalar record: bare lines, blank lines dropped.
@@ -550,14 +568,24 @@ def format_records_for_tier3(
     value = _normalize(value, max_size)
     top_is_array = _is_array(value)
     records = list(value) if top_is_array else [value]
-    ser = _Serializer(depth_flag, max_chars, max_size, drop_shape_only)
+    # The reviewer reads encoded strings decoded (ENG-4342). Cached: the serializer may run twice
+    # and the coverage count reads every string again.
+    cache: dict[str, str] = {}
+
+    def text(s: str) -> str:
+        t = cache.get(s)
+        if t is None:
+            t = cache[s] = _decode_for_review(s)
+        return t
+
+    ser = _Serializer(depth_flag, max_chars, max_size, drop_shape_only, text)
     size_limit_hit = False
 
     blocks = ser.run_records(records, top_is_array)  # greedy
     size_limit_hit |= ser.meter.hit
     if ser.budget_truncated:
         # Something didn't fit at full budget: redo with a per-sibling reserve and spread sampling.
-        fresh = _Serializer(depth_flag, max_chars, max_size, drop_shape_only)
+        fresh = _Serializer(depth_flag, max_chars, max_size, drop_shape_only, text)
         fresh.reserve_mode = True
         depth_flag.pop("coverage_degraded", None)
         ser = fresh
@@ -567,7 +595,7 @@ def format_records_for_tier3(
     meter = _Meter(max_size)
     input_chars = 0
     for r in records:
-        input_chars += _sum_string_content(r, 0, meter)
+        input_chars += _sum_string_content(r, 0, meter, text)
         if meter.hit:
             break
     size_limit_hit |= meter.hit

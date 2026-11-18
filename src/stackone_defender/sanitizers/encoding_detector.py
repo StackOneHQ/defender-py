@@ -98,8 +98,12 @@ def detect_encoding(
     return result
 
 
-def _b64decode_url_safe(candidate: str) -> str | None:
-    """Decode standard or URL-safe base64; None when it isn't valid base64."""
+_NOT_TEXT = object()  # valid base64 of bytes that aren't UTF-8 text
+
+
+def _b64decode_url_safe(candidate: str) -> str | object | None:
+    """Decode standard or URL-safe base64 to UTF-8 text. ``_NOT_TEXT`` when it is valid base64 but not
+    valid UTF-8 (binary data); None when it isn't valid base64."""
     try:
         # Pad to a multiple of 4; b64decode rejects unpadded input (JS atob tolerates it).
         unpadded = candidate.replace("-", "+").replace("_", "/").rstrip("=")
@@ -107,19 +111,20 @@ def _b64decode_url_safe(candidate: str) -> str | None:
     except Exception:
         return None
     try:
-        return decoded_bytes.decode("ascii")
+        # Strict UTF-8; a leading BOM is kept, as in TS (TextDecoder with ignoreBOM).
+        return decoded_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        return decoded_bytes.decode("latin-1", errors="replace")
+        return _NOT_TEXT
 
 
-# Whitespace JavaScript's \s matches, so decodes are kept exactly as in the TS package.
-_JS_WHITESPACE = frozenset(
-    "\t\n\v\f\r \u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff" + "".join(chr(c) for c in range(0x2000, 0x200B))
-)
+# Control characters other than JavaScript's \s ones (tab, LF, VT, FF, CR), as in TS.
+_CONTROL_CHARS = re.compile("[\x00-\x08\x0e-\x1f\x7f-\x9f]")
 
 
-def _is_printable_text(s: str | None) -> bool:
-    return bool(s) and all(0x20 <= ord(c) <= 0x7E or c in _JS_WHITESPACE for c in s)
+def _is_printable_text(s: object) -> bool:
+    """Text, not binary: non-empty, with no control characters other than tab, LF, VT, FF and CR. Any
+    other Unicode character counts, so accented letters, dashes and curly quotes keep the decode."""
+    return isinstance(s, str) and len(s) > 0 and not _CONTROL_CHARS.search(s)
 
 
 # Retries per candidate when a word joined by - or _ makes the whole run undecodable.
