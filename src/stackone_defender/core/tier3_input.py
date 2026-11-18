@@ -50,7 +50,7 @@ _MAX_SEGMENT_WORDS = 3
 _SEGMENT_SPLIT = re.compile(r"\.|\[[0-9]+\]")
 _WORD_SPLIT = re.compile(r"[_$@-]+|(?<=[a-z0-9])(?=[A-Z])")
 _SHAPE_ONLY = [
-    re.compile(r"(?:null|undefined|true|false)", re.IGNORECASE),
+    re.compile(r"(?:null|undefined|true|false)", re.IGNORECASE | re.ASCII),  # ASCII: no ſ→s, ı→i folding
     re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?"),  # number
     re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"),  # UUID
     re.compile(r"(?=[0-9a-fA-F]*[0-9])[0-9a-fA-F]{8,64}"),  # hex ID

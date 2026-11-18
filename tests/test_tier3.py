@@ -904,3 +904,9 @@ class TestDropShapeOnlyFields:
         r = _run(_tier3_only(judge, drop_shape_only_fields=True), {"n": "12", "note": "ok 😀😀"})
         assert judge.calls == ["note: ok 😀😀"]
         assert r.coverage_degraded is not True
+
+    def test_case_folding_is_ascii_only(self):
+        # JS /i doesn't fold U+017F to s or U+0131 to i, so these values stay, as in TS.
+        judge = _Judge()
+        _run(_tier3_only(judge, drop_shape_only_fields=True), {"a": "fal\u017fe", "b": "undef\u0131ned", "c": "TRUE"})
+        assert judge.calls == ["a: fal\u017fe\nb: undef\u0131ned"]
