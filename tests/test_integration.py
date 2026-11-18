@@ -956,10 +956,10 @@ class TestTier1GatedOnTier2:
         t2.classify_chunks_batch.side_effect = classify
         return t2
 
-    def _run(self, mock_create, t2, sync: bool):
+    def _run(self, mock_create, t2, sync: bool, payload: dict | None = None):
         mock_create.return_value = t2
         defense = create_prompt_defense(enable_tier2=True, block_high_risk=True)
-        payload = {"description": self.TEXT}
+        payload = payload or {"description": self.TEXT}
         if sync:
             return defense.defend_tool_result(payload, "generic_get_record")
         return asyncio.run(defense.defend_tool_result_async(payload, "generic_get_record"))
@@ -987,4 +987,20 @@ class TestTier1GatedOnTier2:
     )
     def test_text_tier2_did_not_really_score_keeps_tier1(self, mock_create, t2):
         r = self._run(mock_create, self._tier2(**t2), sync=True)
+        assert r.tier1_gated is None and not r.allowed
+
+    def test_phrase_in_another_fields_chunk_does_not_count(self, mock_create):
+        t2 = self._tier2(0.1)
+        t2.prepare_chunks.side_effect = lambda s: {
+            "chunks": [s[: s.find("restricted")], s[s.find("restricted") :]] if s.startswith("The borrower") else [s],
+            "skipped": False,
+        }
+        payload = {"description": self.TEXT, "notes": "Note that unrestricted access needs approval."}
+        r = self._run(mock_create, t2, sync=True, payload=payload)
+        assert r.tier1_gated is None and not r.allowed
+
+    def test_every_occurrence_needs_a_chunk(self, mock_create):
+        t2 = self._tier2(0.1)
+        t2.prepare_chunks.side_effect = lambda s: {"chunks": [self.TEXT], "skipped": False}
+        r = self._run(mock_create, t2, sync=True, payload={"description": f"{self.TEXT} {self.TEXT}"})
         assert r.tier1_gated is None and not r.allowed

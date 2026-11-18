@@ -323,8 +323,9 @@ class SanitizationMetadata:
     # The texts Tier 1 found patterns in: field values (up to the analysis cap), decoded text and
     # object keys. Tier 1 can only block when Tier 2 agrees, and only for text Tier 2 also read.
     tier1_match_texts: list[str] = field(default_factory=list)
-    # The phrases Tier 1 matched. Tier 2 must have scored each one whole, in one chunk.
-    tier1_match_phrases: list[str] = field(default_factory=list)
+    # The phrases Tier 1 matched, as ``(of, phrase)`` with the text each was found in. Tier 2 must
+    # have scored every occurrence whole, each in one chunk of that text.
+    tier1_match_phrases: list[tuple[str, str]] = field(default_factory=list)
     # Tier 1's normalised copies ``(of, text)`` of texts where a matched phrase appears only after
     # normalisation (leet, line-split or joined words). Tier 2 scores these copies too.
     tier1_normalised_copies: list[tuple[str, str]] = field(default_factory=list)

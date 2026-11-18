@@ -68,14 +68,47 @@ _TIER3_CASCADE_REVIEW = ("chunk", "result")
 
 
 
-def _all_phrases_read(phrases: list[str], chunks: list[str]) -> bool:
-    """Whether every matched phrase sits whole in one chunk Tier 2 scored. An empty phrase counts as unread."""
-    if not phrases:
-        return True
-    keys = [phrase_key(c) for c in chunks]
-    for p in phrases:
-        k = phrase_key(p)
-        if not k or not any(k in c for c in keys):
+def _all_phrases_read(
+    phrases: list[tuple[str, str]],
+    copies: list[tuple[str, str]],
+    chunks_by_text: dict[str, list[str]],
+) -> bool:
+    """Whether Tier 2 read each matched phrase where Tier 1 found it: every occurrence in the source
+    text (or, for a phrase only Tier 1's normalised copy holds, in that copy) sits whole in one of
+    that text's own chunks. So the same phrase quoted in another field or sentence doesn't count.
+    An empty phrase counts as unread."""
+    keys: dict[str, str] = {}
+
+    def key(s: str) -> str:
+        k = keys.get(s)
+        if k is None:
+            k = keys[s] = phrase_key(s)
+        return k
+
+    def covered(text: str, k: str) -> bool:
+        need = key(text).count(k)
+        if need == 0:
+            return False
+        have = 0
+        for c in chunks_by_text.get(text, []):
+            have += key(c).count(k)
+            if have >= need:
+                return True
+        return False
+
+    checked: set[tuple[str, str]] = set()
+    for of, phrase in phrases:
+        k = phrase_key(phrase)
+        if not k:
+            return False
+        if (k, of) in checked:
+            continue
+        checked.add((k, of))
+        if key(of).count(k) > 0:
+            read = covered(of, k)
+        else:
+            read = any(o == of and covered(text, k) for o, text in copies)
+        if not read:
             return False
     return True
 
@@ -133,7 +166,7 @@ class _Tier2Outcome:
     # Texts Tier 2 scored in full, their chunks, and whether any chunk score was unusable. They
     # decide whether Tier 1 detections may be gated on Tier 2.
     read_texts: set[str] = field(default_factory=set)
-    read_chunks: list[str] = field(default_factory=list)
+    chunks_by_text: dict[str, list[str]] = field(default_factory=dict)
     non_finite: bool = False
 
 
@@ -710,7 +743,11 @@ class PromptDefense:
             and not tier2.non_finite
             and tier2.raw_score < _TIER1_GATE_SCORE
             and all(t in tier2.read_texts for t in sanitized.metadata.tier1_match_texts)
-            and _all_phrases_read(sanitized.metadata.tier1_match_phrases, tier2.read_chunks)
+            and _all_phrases_read(
+                sanitized.metadata.tier1_match_phrases,
+                sanitized.metadata.tier1_normalised_copies,
+                tier2.chunks_by_text,
+            )
         )
         if gated:
             return True, min(overall, _RISK_LEVELS.index("medium")), [], []
@@ -1492,7 +1529,7 @@ class PromptDefense:
         for i, (start, end) in enumerate(string_ranges):
             if start >= 0 and not truncated[i] and not any(j in degenerate for j in range(start, end)):
                 out.read_texts.add(strings[i])
-                out.read_chunks.extend(all_chunks[start:end])
+                out.chunks_by_text[strings[i]] = all_chunks[start:end]
         field_max: dict[int, float] = {}
         for i, s_max in zip((i for i, (st, _) in enumerate(string_ranges) if st >= 0), agg.per_string_scores, strict=True):
             field_max[origin[i]] = max(field_max.get(origin[i], 0.0), s_max)

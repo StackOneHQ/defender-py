@@ -382,19 +382,16 @@ class ToolResultSanitizer:
         metadata.tier1_match_texts.append(text)
         raw = phrase_key(text)
         missing: list[str] = []
-        for m in matches:
-            metadata.tier1_match_phrases.append(m.matched)
-            k = phrase_key(m.matched)
-            if m.normalised and k and k not in raw:
+        for phrase in dict.fromkeys(m.matched for m in matches):
+            metadata.tier1_match_phrases.append((text, phrase))
+            k = phrase_key(phrase)
+            if k and k not in raw:
                 missing.append(k)
         if not missing:
             return
-        for alternate in (False, True):
-            copy = tier1_analysis_copy(text, alternate)
-            if copy == text or any(c == copy for _, c in metadata.tier1_normalised_copies):
-                continue
+        for copy in dict.fromkeys(tier1_analysis_copy(text, alternate) for alternate in (False, True)):
             key = phrase_key(copy)
-            if any(k in key for k in missing):
+            if copy != text and any(k in key for k in missing):
                 metadata.tier1_normalised_copies.append((text, copy))
 
     def _detect_in_key(self, key: str, key_path: str, context: SanitizationContext, metadata: SanitizationMetadata) -> None:
