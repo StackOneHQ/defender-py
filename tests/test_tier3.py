@@ -881,3 +881,32 @@ class TestPromptDefenseTier3BlockThreshold:
         result = asyncio.run(self._defense(0.7).defend_tool_result_async({"body": "x"}, "t"))
         assert result.tier3.score is None
         assert result.allowed is True  # no usable score -> falls back to decision=allow
+
+
+class TestDropShapeOnlyFields:
+    """``drop_shape_only_fields``: what the reviewer reads. The full contract is in tier3-serialize.json."""
+
+    PAGE = {"items": [{"id": "0b9f2c1e-3d4a-4c5b-8e6f-7a8b9c0d1e2f", "done": False, "title": "Weekly sync"}]}
+
+    def test_snake_case_option(self):
+        judge = _Judge()
+        _run(_tier3_only(judge, drop_shape_only_fields=True), self.PAGE)
+        assert judge.calls == ["items[0].title: Weekly sync"]
+
+    def test_off_by_default(self):
+        judge = _Judge()
+        _run(_tier3_only(judge), self.PAGE)
+        assert "items[0].id: 0b9f2c1e-3d4a-4c5b-8e6f-7a8b9c0d1e2f" in judge.calls[0]
+
+    def test_astral_text_counts_as_covered(self):
+        # Lengths are UTF-16: a left-out value next to astral text must not flag oversize.
+        judge = _Judge()
+        r = _run(_tier3_only(judge, drop_shape_only_fields=True), {"n": "12", "note": "ok 😀😀"})
+        assert judge.calls == ["note: ok 😀😀"]
+        assert r.coverage_degraded is not True
+
+    def test_case_folding_is_ascii_only(self):
+        # JS /i doesn't fold U+017F to s or U+0131 to i, so these values stay, as in TS.
+        judge = _Judge()
+        _run(_tier3_only(judge, drop_shape_only_fields=True), {"a": "fal\u017fe", "b": "undef\u0131ned", "c": "TRUE"})
+        assert judge.calls == ["a: fal\u017fe\nb: undef\u0131ned"]

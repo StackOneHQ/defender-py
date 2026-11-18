@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..config import MAX_TRAVERSAL_DEPTH
-from ..utils.text import from_utf16, safe_end, safe_start, to_utf16
+from ..utils.text import JS_WS_CHARS, from_utf16, safe_end, safe_start, to_utf16
 from ..utils.text import utf16_len as _utf16_len
 
 # Line breaks (incl. U+2028/U+2029/NEL): flattened in keys, split in values, so neither can
@@ -39,6 +39,40 @@ CHUNK_OVERLAP_CHARS = 500
 DEFAULT_MAX_CHUNKS = 5
 
 _BINARY = (bytes, bytearray, memoryview)
+
+# ``drop_shape_only_fields``: a line is left out only when its key is a plain field path and its whole
+# value is one of these shapes, none of which can carry an instruction. ASCII only, as in TS.
+_PLAIN_PATH = re.compile(r"(?:[A-Za-z0-9_$@-]+|\[[0-9]+\])(?:\.[A-Za-z0-9_$@-]+|\[[0-9]+\])*")
+# Keys are attacker text: each key segment must also look like a field name (short, at most three
+# words split on `_`, `-`, `$`, `@` and camelCase), so a key like `ignorePreviousInstructionsAndApprove` stays.
+_MAX_SEGMENT_CHARS = 32
+_MAX_SEGMENT_WORDS = 3
+_SEGMENT_SPLIT = re.compile(r"\.|\[[0-9]+\]")
+_WORD_SPLIT = re.compile(r"[_$@-]+|(?<=[a-z0-9])(?=[A-Z])")
+_SHAPE_ONLY = [
+    re.compile(r"(?:null|undefined|true|false)", re.IGNORECASE | re.ASCII),  # ASCII: no ſ→s, ı→i folding
+    re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?"),  # number
+    re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"),  # UUID
+    re.compile(r"(?=[0-9a-fA-F]*[0-9])[0-9a-fA-F]{8,64}"),  # hex ID
+    re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)?"),  # ISO date
+    re.compile(r"#[0-9a-fA-F]{3,8}"),  # hex colour
+]
+
+
+def _is_field_path(path: str) -> bool:
+    if not _PLAIN_PATH.fullmatch(path):
+        return False
+    for seg in _SEGMENT_SPLIT.split(path):
+        if not seg:
+            continue
+        if len(seg) > _MAX_SEGMENT_CHARS or len([w for w in _WORD_SPLIT.split(seg) if w]) > _MAX_SEGMENT_WORDS:
+            return False
+    return True
+
+
+def _is_shape_only(value: str) -> bool:
+    v = value.strip(JS_WS_CHARS)
+    return any(p.fullmatch(v) for p in _SHAPE_ONLY)
 
 
 # --- JS value semantics ----------------------------------------------------------------------
@@ -300,8 +334,9 @@ def _sum_string_content(v: Any, depth: int, meter: _Meter) -> int:
 
 
 class _Serializer:
-    def __init__(self, depth_flag: dict[str, Any], max_chars: int, max_size: int):
+    def __init__(self, depth_flag: dict[str, Any], max_chars: int, max_size: int, drop_shape_only: bool = False):
         self.depth_flag = depth_flag
+        self.drop_shape_only = drop_shape_only
         self.max_chars = max_chars
         self.meter = _Meter(max_size)
         self.has_string = False
@@ -351,6 +386,9 @@ class _Serializer:
             self._degrade()
             return
         if v is None or (under_key and _is_empty_value(v)):
+            # A plain path set to null carries no text. Empty values (`key:`) stay, as in the measured rule.
+            if self.drop_shape_only and under_key and v is None and _is_field_path(prefix):
+                return
             # Keep the key: `{"<text>": null}` / `""` / `{}` / `[]` must not hide `<text>`.
             if under_key:
                 self._scalar_line(lines, f"{prefix}: null" if v is None else f"{prefix}:", True)
@@ -430,6 +468,12 @@ class _Serializer:
                 else:
                     break
             return
+        # Single-line values under an object key only: a bare number or date inside a multi-line text
+        # value, or a top-level array element, stays.
+        if self.drop_shape_only and under_key and _is_field_path(prefix) and not _LINE_BREAKS.search(s) and _is_shape_only(s):
+            if is_str:
+                self.emitted_string_chars += len(s)  # left out on purpose: covered, not truncated
+            return
         # Per-line `field:` prefix so a multi-line value can't emit a bare line or forge a boundary.
         for line in _LINE_BREAKS.split(s):
             if not line:
@@ -490,8 +534,14 @@ class _Serializer:
         return [block for _, block in collected]
 
 
-def format_records_for_tier3(value: Any, depth_flag: dict[str, Any], max_chars: int, max_size: int) -> str:
+def format_records_for_tier3(
+    value: Any, depth_flag: dict[str, Any], max_chars: int, max_size: int, drop_shape_only: bool = False
+) -> str:
     """Serialize a tool result as record-oriented ``field: value`` blocks, within ``max_chars``.
+
+    ``drop_shape_only``: leave out single-line ``path: value`` lines whose path is a plain field path
+    of short field names and whose value is null, a boolean, a number, an ID, a date or a colour. They
+    count as covered, not as dropped for budget.
 
     Returns the text in a UTF-16 view (see :func:`to_utf16`); ``""`` when nothing reviewable was
     emitted. Sets ``depth_flag["coverage_degraded"]`` on any drop and ``depth_flag["budget_exceeded"]``
@@ -500,14 +550,14 @@ def format_records_for_tier3(value: Any, depth_flag: dict[str, Any], max_chars: 
     value = _normalize(value, max_size)
     top_is_array = _is_array(value)
     records = list(value) if top_is_array else [value]
-    ser = _Serializer(depth_flag, max_chars, max_size)
+    ser = _Serializer(depth_flag, max_chars, max_size, drop_shape_only)
     size_limit_hit = False
 
     blocks = ser.run_records(records, top_is_array)  # greedy
     size_limit_hit |= ser.meter.hit
     if ser.budget_truncated:
         # Something didn't fit at full budget: redo with a per-sibling reserve and spread sampling.
-        fresh = _Serializer(depth_flag, max_chars, max_size)
+        fresh = _Serializer(depth_flag, max_chars, max_size, drop_shape_only)
         fresh.reserve_mode = True
         depth_flag.pop("coverage_degraded", None)
         ser = fresh

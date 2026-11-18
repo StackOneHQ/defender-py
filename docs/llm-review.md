@@ -126,6 +126,7 @@ With the default `on_error="allow"`, a failed chunk is skipped (fail open), and 
 | `max_concurrency` | unbounded | Max in-flight provider calls per instance, per event loop. Each sync `defend_tool_result` call runs its own loop, so the cap doesn't span threads that use the sync API. Set `timeout_ms` with it. |
 | `cascade_review` | `"chunk"` | Cascade: what Tier 3 reviews when a result escalates. `"chunk"`: the chunk that drove Tier 2's score. `"result"`: the whole result, chunked as in `tier3_only` (up to about `max_chunks` calls). An allow on every chunk counts as Tier 3's allow; a failed chunk is a Tier 3 failure, so `on_error` decides. |
 | `stop_on_first_block` | `False` | Whole-result reviews: cancel the remaining chunk calls once one blocks. |
+| `drop_shape_only_fields` | `False` | Whole-result reviews: leave out `path: value` lines whose key is a plain path of short field names and whose whole value is null, a boolean, a number, a UUID or hex ID, an ISO date or a hex colour. Only the reviewer's input changes. |
 | `on_event` | none | Called once per provider call with a `Tier3Event` (kind, mode, chunk, latency, usage, redacted error code). No content. Exceptions are ignored. |
 | `include_raw` | `True` | Keep `raw` on `result.tier3`. `raw` can quote tool content. |
 
