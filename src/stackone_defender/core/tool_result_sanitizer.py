@@ -376,22 +376,22 @@ class ToolResultSanitizer:
 
     @staticmethod
     def _record_tier1_match(metadata: SanitizationMetadata, text: str, matches: list[PatternMatch]) -> None:
-        """Record what Tier 1 matched, for the Tier 2 gate. A phrase matched only on Tier 1's
-        normalised copy (leet, split or joined words) isn't in the raw text, so Tier 2 also gets
-        that copy."""
+        """Record what Tier 1 matched, for the Tier 2 gate. Tier 1's normalised copy (leet, split or
+        joined words) can hold occurrences of a phrase the raw text doesn't, so Tier 2 also gets that
+        copy."""
         metadata.tier1_match_texts.append(text)
-        raw = phrase_key(text)
-        missing: list[str] = []
+        keys: list[str] = []
         for phrase in dict.fromkeys(m.matched for m in matches):
             metadata.tier1_match_phrases.append((text, phrase))
             k = phrase_key(phrase)
-            if k and k not in raw:
-                missing.append(k)
-        if not missing:
+            if k:
+                keys.append(k)
+        if not keys or not any(m.normalised for m in matches):
             return
+        raw = phrase_key(text)
         for copy in dict.fromkeys(tier1_analysis_copy(text, alternate) for alternate in (False, True)):
             key = phrase_key(copy)
-            if copy != text and any(k in key for k in missing):
+            if copy != text and any(key.count(k) > raw.count(k) for k in keys):
                 metadata.tier1_normalised_copies.append((text, copy))
 
     def _detect_in_key(self, key: str, key_path: str, context: SanitizationContext, metadata: SanitizationMetadata) -> None:

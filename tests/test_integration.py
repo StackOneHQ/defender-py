@@ -1004,3 +1004,17 @@ class TestTier1GatedOnTier2:
         t2.prepare_chunks.side_effect = lambda s: {"chunks": [self.TEXT], "skipped": False}
         r = self._run(mock_create, t2, sync=True, payload={"description": f"{self.TEXT} {self.TEXT}"})
         assert r.tier1_gated is None and not r.allowed
+
+    def test_normalised_only_occurrence_next_to_literal_is_checked(self, mock_create):
+        text = f"{self.TEXT} The guarantor has unre\nstricted access to the ledger."
+        t2 = self._tier2(0.1)
+        # The raw text's chunk holds the literal occurrence; the copy's chunk drops the joined one.
+        t2.prepare_chunks.side_effect = lambda s: {
+            "chunks": [s] if s == text else [s[: s.index(".") + 1]],
+            "skipped": False,
+        }
+        r = self._run(mock_create, t2, sync=True, payload={"description": text})
+        assert "uncensored" in r.detections
+        assert r.tier1_gated is None and not r.allowed
+        whole = self._run(mock_create, self._tier2(0.1), sync=True, payload={"description": text})
+        assert whole.tier1_gated is True
