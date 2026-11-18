@@ -95,3 +95,11 @@ def js_typeof(v: Any) -> str:
     if callable(v):
         return "function"
     return "object"
+
+
+_JS_WS_RUN = re.compile(f"[{JS_WS}]+")
+
+
+def phrase_key(s: str) -> str:
+    """Lower-cased, JS whitespace collapsed: how a Tier 1 matched phrase is looked up in Tier 2's chunks."""
+    return _JS_WS_RUN.sub(" ", s.lower()).strip(JS_WS_CHARS)

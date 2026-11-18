@@ -23,6 +23,11 @@ DEFAULT_DETECTOR_CONFIG = {
 }
 
 
+
+def tier1_analysis_copy(text: str, alternate: bool) -> str:
+    """The normalised copy Tier 1 matches patterns on (``alternate``: the other reading of ambiguous text)."""
+    return split_joined_word_pairs(join_line_split_words(normalize_for_detection(text, alternate=alternate)))
+
 class PatternDetector:
     """Pattern Detector for Tier 1 classification."""
 
@@ -55,11 +60,8 @@ class PatternDetector:
         # scanned in its other reading (invisible characters as spaces, leet in
         # ID-like tokens): patterns are specific enough that scanning both costs
         # little. Analysis-only.
-        def tier1_copy(alternate: bool) -> str:
-            return split_joined_word_pairs(join_line_split_words(normalize_for_detection(raw_text, alternate=alternate)))
-
-        analysis_text = tier1_copy(False)
-        alternate_text = tier1_copy(True)
+        analysis_text = tier1_analysis_copy(raw_text, False)
+        alternate_text = tier1_analysis_copy(raw_text, True)
 
         # Fast filter: short-circuit if neither raw nor normalised text
         # contains keywords. Raw text is checked to preserve detection of

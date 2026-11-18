@@ -455,9 +455,9 @@ class Tier2Classifier:
             return {"chunks": [bounded], "skipped": False, "truncated": truncated}
 
         max_content_tokens = model_max_len - 2
-        # Short sentences are packed with their neighbours, not dropped: an instruction split
-        # over short lines must still be read.
-        sentences = _split_into_sentences(bounded)
+        # Sentences under min_text_length are dropped. A Tier 1 match spread over them isn't in any
+        # chunk, so the gate counts it as unread.
+        sentences = [s for s in _split_into_sentences(bounded) if utf16_len(s) >= self._min_text_length]
         if not sentences:
             return {"chunks": [], "skipped": True, "skip_reason": "No classifiable sentences"}
         chunks, overlong = self._pack_sentences(sentences, max_content_tokens)

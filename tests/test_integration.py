@@ -934,12 +934,19 @@ class TestTier1GatedOnTier2:
     TEXT = "The borrower has unrestricted access to the accounts."
 
     @staticmethod
-    def _tier2(score: float, *, truncated: bool = False, degenerate: bool = False):
+    def _tier2(score: float, *, truncated: bool = False, degenerate: bool = False, split: bool = False):
         t2 = MagicMock()
         t2.get_risk_level.return_value = "low"
         t2.get_multihead_config.return_value = None
         t2.get_temperature.return_value = 1.0
-        t2.prepare_chunks.side_effect = lambda s: {"chunks": [s], "skipped": False, "truncated": truncated}
+
+        def prepare(s):
+            # split: the matched phrase straddles two chunks.
+            cut = s.find("restricted") if split else -1
+            chunks = [s[:cut], s[cut:]] if cut > 0 else [s]
+            return {"chunks": chunks, "skipped": False, "truncated": truncated}
+
+        t2.prepare_chunks.side_effect = prepare
 
         def classify(chunks, stats=None):
             if degenerate and stats is not None:
@@ -974,8 +981,9 @@ class TestTier1GatedOnTier2:
             {"score": float("nan")},
             {"score": 0.1, "truncated": True},
             {"score": 0.1, "degenerate": True},
+            {"score": 0.1, "split": True},
         ],
-        ids=["non-finite", "truncated", "degenerate"],
+        ids=["non-finite", "truncated", "degenerate", "phrase-split"],
     )
     def test_text_tier2_did_not_really_score_keeps_tier1(self, mock_create, t2):
         r = self._run(mock_create, self._tier2(**t2), sync=True)

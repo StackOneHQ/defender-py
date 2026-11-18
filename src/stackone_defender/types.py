@@ -323,6 +323,11 @@ class SanitizationMetadata:
     # The texts Tier 1 found patterns in: field values (up to the analysis cap), decoded text and
     # object keys. Tier 1 can only block when Tier 2 agrees, and only for text Tier 2 also read.
     tier1_match_texts: list[str] = field(default_factory=list)
+    # The phrases Tier 1 matched. Tier 2 must have scored each one whole, in one chunk.
+    tier1_match_phrases: list[str] = field(default_factory=list)
+    # Tier 1's normalised copies ``(of, text)`` of texts where a matched phrase appears only after
+    # normalisation (leet, line-split or joined words). Tier 2 scores these copies too.
+    tier1_normalised_copies: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -455,13 +460,9 @@ class DefenseResult:
     # Under multi-head aux veto this is explicitly ``0.0`` (not ``None``) so the
     # operator triple ``(tier2_score, risk_level, allowed)`` reads coherently.
     tier2_score: float | None = None
-    # Pre-density / pre-rule global max-main score; forensic snapshot. ``None``
-    # when Tier 2 was skipped or no chunks were classified.
+    # Pre-density / pre-rule global max-main score. Decides whether Tier 1 may block.
+    # ``None`` when Tier 2 was skipped or no chunks were classified.
     tier2_raw_score: float | None = None
-    # True when Tier 1 found patterns but they did not count toward the verdict, because
-    # tier2_raw_score was below 0.3 and Tier 2 read every text the patterns were found in.
-    # ``detections`` still lists them. ``None`` otherwise.
-    tier1_gated: bool | None = None
     # Aux-head score of the decision-relevant chunk under multi-head config.
     # ``None`` under single-head (no aux signal).
     tier2_aux_score: float | None = None
@@ -497,3 +498,7 @@ class DefenseResult:
     coverage_degraded: bool | None = None
     # Present only when the tier3_only chunk review ran.
     tier3_chunk_summary: Tier3ChunkSummary | None = None
+    # True when Tier 1 found patterns but they did not count toward the verdict, because
+    # tier2_raw_score was below 0.3 and Tier 2 read every text and phrase the patterns matched.
+    # ``detections`` still lists them. ``None`` otherwise.
+    tier1_gated: bool | None = None

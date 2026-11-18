@@ -126,7 +126,7 @@ Detects (never rewrites) injection signals and records them as evidence:
 - **Encoding detection**: decode-then-detect: a decoded payload is escalated only if it trips a real attack pattern. Tier 2 scores the decoded text too
 - **Boundary annotation (opt-in)**: `[UD-{id}]…[/UD-{id}]` wrappers when `annotate_boundary=True` (npm: `annotateBoundary`). Use `generate_boundary_instructions` from the package root in prompts when you enable wrapping.
 
-When Tier 2 is on, Tier 1 can't block alone. Its detections count only when Tier 2's undamped score (`tier2_raw_score`) is at least 0.3, or when Tier 2 didn't read the text they were found in: an object key, a field longer than Tier 2's 10,000-character cap, or text Tier 2 cut or set aside as unreadable. Otherwise `detections` still lists them and `tier1_gated` is `True`. With Tier 2 off or unavailable, Tier 1 blocks alone.
+When Tier 2 is on, Tier 1 can't block alone. Its detections count only when Tier 2's undamped score (`tier2_raw_score`) is at least 0.3, or when Tier 2 didn't read what they matched: an object key, a field longer than Tier 2's 10,000-character cap, text Tier 2 cut or set aside as unreadable, or a matched phrase that no single Tier 2 chunk holds whole (split across chunks or short lines, or made of hidden characters Tier 2 removes). When a phrase appears only after Tier 1's normalization, Tier 2 also scores that normalized copy. Otherwise `detections` still lists them, `tier1_gated` is `True` and Tier 1's risk is capped at `medium`. With Tier 2 off or unavailable, Tier 1 blocks alone. The 0.3 bar is set for the bundled model.
 
 ### Tier 2: ML classification (ONNX)
 
