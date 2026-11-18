@@ -20,7 +20,8 @@ from ..classifiers.onnx_classifier import BatchTokenStats
 from ..classifiers.pattern_detector import PatternDetector, create_pattern_detector
 from ..classifiers.tier2_classifier import Tier2Classifier, create_tier2_classifier
 from ..classifiers.tier3_orchestrator import get_default_tier3_provider
-from ..config import MAX_TRAVERSAL_DEPTH, create_config
+from ..config import DEFAULT_MAX_FIELD_ANALYSIS_LENGTH, MAX_TRAVERSAL_DEPTH, create_config
+from ..sanitizers.encoding_detector import decode_all_levels
 from ..sfe.preprocess import SfePredictor, get_default_predictor, sfe_preprocess
 from ..types import (
     DataBoundary,
@@ -30,6 +31,7 @@ from ..types import (
     PhaseTimings,
     PromptDefenseConfig,
     RiskLevel,
+    SanitizationResult,
     Tier1Result,
     Tier2Stats,
     Tier3ChunkSummary,
@@ -47,7 +49,7 @@ from ..types import (
 )
 from ..utils.boundary import generate_data_boundary
 from ..utils.redact import describe_error, redact_error_text
-from ..utils.text import truncate
+from ..utils.text import phrase_key, truncate
 from .sentence_cleaner import clean_high_risk_content
 from .tier3_input import DEFAULT_MAX_CHUNKS, chunk_tier3_input, content_budget, format_records_for_tier3
 from .tier3_policy import MISSING_PROVIDER, Tier3Policy
@@ -65,6 +67,51 @@ _TIER3_ON_OVERSIZE = ("skip", "block", "scan_anyway")
 _TIER3_CASCADE_REVIEW = ("chunk", "result")
 
 
+
+def _all_phrases_read(
+    phrases: list[tuple[str, str]],
+    copies: list[tuple[str, str]],
+    chunks_by_text: dict[str, list[str]],
+) -> bool:
+    """Whether Tier 2 read each matched phrase where Tier 1 found it: every occurrence in the source
+    text (or, for a phrase only Tier 1's normalised copy holds, in that copy) sits whole in one of
+    that text's own chunks. So the same phrase quoted in another field or sentence doesn't count.
+    An empty phrase counts as unread."""
+    keys: dict[str, str] = {}
+
+    def key(s: str) -> str:
+        k = keys.get(s)
+        if k is None:
+            k = keys[s] = phrase_key(s)
+        return k
+
+    def covered(text: str, k: str) -> bool:
+        need = key(text).count(k)
+        if need == 0:
+            return False
+        have = 0
+        for c in chunks_by_text.get(text, []):
+            have += key(c).count(k)
+            if have >= need:
+                return True
+        return False
+
+    checked: set[tuple[str, str]] = set()
+    for of, phrase in phrases:
+        k = phrase_key(phrase)
+        if not k:
+            return False
+        if (k, of) in checked:
+            continue
+        checked.add((k, of))
+        if key(of).count(k) > 0:
+            read = covered(of, k)
+        else:
+            read = any(o == of and covered(text, k) for o, text in copies)
+        if not read:
+            return False
+    return True
+
 @dataclass
 class _Tier2Aggregate:
     """Aggregated chunk-level scoring state before the decision branch.
@@ -78,6 +125,8 @@ class _Tier2Aggregate:
     """
 
     per_string_scores: list[float] = field(default_factory=list)
+    # Per source field max, for density damping (a field and its decoded copy count once).
+    field_scores: list[float] = field(default_factory=list)
     # Global max main score across all chunks, pre-density / pre-rule.
     max_main: float | None = None
     max_main_sentence: str | None = None
@@ -89,6 +138,8 @@ class _Tier2Aggregate:
     rule_top_main: float = -1.0
     rule_top_aux: float | None = None
     rule_top_chunk: str = ""
+    # True when any chunk score was not a finite number.
+    non_finite: bool = False
 
 
 @dataclass
@@ -112,6 +163,11 @@ class _Tier2Outcome:
     high_risk_values: set[str] = field(default_factory=set)
     # True when string extraction threw: the payload couldn't be scanned. Strict mode blocks it.
     payload_error: bool = False
+    # Texts Tier 2 scored in full, their chunks, and whether any chunk score was unusable. They
+    # decide whether Tier 1 detections may be gated on Tier 2.
+    read_texts: set[str] = field(default_factory=set)
+    chunks_by_text: dict[str, list[str]] = field(default_factory=dict)
+    non_finite: bool = False
 
 
 @dataclass
@@ -259,6 +315,9 @@ def _finite_at_least_one(v: Any) -> bool:
 
 
 _RISK_LEVELS: list[RiskLevel] = ["low", "medium", "high", "critical"]
+# A Tier 1 match blocks only when Tier 2's undamped score is at least this (ENG-4207).
+# Calibrated on the bundled model; a different model needs its own value.
+_TIER1_GATE_SCORE = 0.3
 
 
 class PromptDefense:
@@ -662,6 +721,39 @@ class PromptDefense:
         )
 
     @staticmethod
+    def _gate_tier1(
+        sanitized: SanitizationResult,
+        detections: list[str],
+        tier1_flagged: list[str],
+        tier2: _Tier2Outcome,
+    ) -> tuple[bool, int, list[str], list[str]]:
+        """Tier 1 can't block alone: its detections count only if Tier 2 agrees, or if Tier 2
+        didn't read what they matched: the text they were found in (a key, a field past Tier 2's
+        cap, a field Tier 2 skipped), or a matched phrase no single scored chunk holds whole (split
+        across chunks or short lines, or visible only to Tier 1, like hidden characters). No Tier 2
+        score, or an unusable one, keeps Tier 1's verdict.
+
+        Returns ``(gated, tier1_idx, detections, tier1_flagged)`` for the verdict. A gated Tier 1
+        keeps its tool-rule base risk (medium at most) but not its escalation.
+        """
+        overall = _RISK_LEVELS.index(sanitized.metadata.overall_risk_level)
+        gated = (
+            bool(detections)
+            and tier2.raw_score is not None
+            and not tier2.non_finite
+            and tier2.raw_score < _TIER1_GATE_SCORE
+            and all(t in tier2.read_texts for t in sanitized.metadata.tier1_match_texts)
+            and _all_phrases_read(
+                sanitized.metadata.tier1_match_phrases,
+                sanitized.metadata.tier1_normalised_copies,
+                tier2.chunks_by_text,
+            )
+        )
+        if gated:
+            return True, min(overall, _RISK_LEVELS.index("medium")), [], []
+        return False, overall, detections, tier1_flagged
+
+    @staticmethod
     def _finalize_allowed_and_risk(
         *,
         detections: list[str],
@@ -1057,12 +1149,12 @@ class PromptDefense:
         tier1_ms = (time.perf_counter() - t_tier1_start) * 1000
 
         tier2 = (
-            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag)
+            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag, sanitized.metadata.tier1_normalised_copies)
             if self._tier2 is not None
             else _Tier2Outcome()
         )
 
-        tier1_idx = _RISK_LEVELS.index(sanitized.metadata.overall_risk_level)
+        tier1_gated, tier1_idx, det_v, flagged_v = self._gate_tier1(sanitized, detections, tier1_flagged, tier2)
         tier2_idx = _RISK_LEVELS.index(tier2.risk)
         risk_level = _RISK_LEVELS[max(tier1_idx, tier2_idx)]
 
@@ -1085,13 +1177,13 @@ class PromptDefense:
             review_flag,
             tier2_has_threat=tier2_has_threat,
             tier2_idx=tier2_idx,
-            tier1_detected=bool(detections or tier1_flagged),
-            tier1_risk=sanitized.metadata.overall_risk_level,
+            tier1_detected=bool(det_v or flagged_v),
+            tier1_risk=_RISK_LEVELS[tier1_idx],
         )
 
         risk_level, allowed = self._finalize_allowed_and_risk(
-            detections=detections,
-            tier1_flagged=tier1_flagged,
+            detections=det_v,
+            tier1_flagged=flagged_v,
             tier2_has_threat=tier2_has_threat,
             tier2_idx=tier2_idx,
             tier1_idx=tier1_idx,
@@ -1118,6 +1210,7 @@ class PromptDefense:
             detected_field_count=len(prm),
             tier2_score=tier2.effective_score,
             tier2_raw_score=tier2.raw_score,
+            tier1_gated=True if tier1_gated else None,
             tier2_aux_score=tier2.aux_score,
             tier2_multihead_blocked=tier2.multihead_blocked,
             tier2_skip_reason=tier2.skip_reason,
@@ -1205,13 +1298,13 @@ class PromptDefense:
         # need to ``assert self._tier2 is not None`` -- those asserts
         # would be stripped under PYTHONOPTIMIZE.
         tier2 = (
-            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag)
+            self._evaluate_tier2(self._tier2, sfe_filtered_value, depth_flag, sanitized.metadata.tier1_normalised_copies)
             if self._tier2 is not None
             else _Tier2Outcome()
         )
 
         # Combine risk levels (take the higher of Tier 1 and Tier 2)
-        tier1_idx = _RISK_LEVELS.index(sanitized.metadata.overall_risk_level)
+        tier1_gated, tier1_idx, det_v, flagged_v = self._gate_tier1(sanitized, detections, tier1_flagged, tier2)
         tier2_idx = _RISK_LEVELS.index(tier2.risk)
         risk_level = _RISK_LEVELS[max(tier1_idx, tier2_idx)]
 
@@ -1232,8 +1325,8 @@ class PromptDefense:
         # Threat signals: Tier 1 detections, Tier 1 sanitization methods, or
         # Tier 2 above-threshold (subject to multi-head veto).
         risk_level, allowed = self._finalize_allowed_and_risk(
-            detections=detections,
-            tier1_flagged=tier1_flagged,
+            detections=det_v,
+            tier1_flagged=flagged_v,
             tier2_has_threat=tier2_has_threat,
             tier2_idx=tier2_idx,
             tier1_idx=tier1_idx,
@@ -1259,6 +1352,7 @@ class PromptDefense:
             detected_field_count=len(prm),
             tier2_score=tier2.effective_score,
             tier2_raw_score=tier2.raw_score,
+            tier1_gated=True if tier1_gated else None,
             tier2_aux_score=tier2.aux_score,
             tier2_multihead_blocked=tier2.multihead_blocked,
             tier2_skip_reason=tier2.skip_reason,
@@ -1332,6 +1426,7 @@ class PromptDefense:
         tier2: Tier2Classifier,
         sfe_filtered_value: Any,
         depth_flag: dict[str, bool],
+        normalised_copies: list[tuple[str, str]],
     ) -> _Tier2Outcome:
         """Run the Tier 2 pipeline end to end for one tool result.
 
@@ -1367,9 +1462,29 @@ class PromptDefense:
             ]
         except Exception as e:
             return self._tier2_extraction_error(out, e)
+        # Tier 2 also scores decoded text (base64, hex, ROT13...), decoded from the same head
+        # Tier 1 decodes, so the texts match. ``origin`` maps each scored text to the extracted
+        # string it came from, so density damping counts each field once.
+        origin: list[int] = []
+        for i in range(len(strings)):
+            origin.append(i)
+            head = strings[i][:DEFAULT_MAX_FIELD_ANALYSIS_LENGTH]
+            decoded, levels = decode_all_levels(head)
+            if levels > 0 and decoded != head:
+                strings.append(decoded)
+                origin.append(i)
+        # And Tier 1's normalised copies of the texts it matched, for those Tier 2 scores.
+        index = dict(zip(strings, origin, strict=True))
+        for of, text in normalised_copies:
+            o = index.get(of)
+            if o is None or text in index:
+                continue
+            index[text] = o
+            strings.append(text)
+            origin.append(o)
         # Phase 1: prepare chunks (warmup + tokenize + pack).
         t_prep_start = time.perf_counter()
-        all_chunks, string_ranges, skip_reasons = self._tier2_build_chunks(tier2, strings)
+        all_chunks, string_ranges, skip_reasons, truncated = self._tier2_build_chunks(tier2, strings)
 
         if not strings:
             scoped = fields_for_tier2 is not None and len(fields_for_tier2) > 0
@@ -1394,7 +1509,7 @@ class PromptDefense:
         out.cold_load = was_cold
         stats = BatchTokenStats()
         multihead_cfg = tier2.get_multihead_config()
-        all_scores, all_pairs, infer_skip, unique_count = self._tier2_run_inference(
+        all_scores, all_pairs, infer_skip, unique_count, degenerate = self._tier2_run_inference(
             tier2, all_chunks, multihead_cfg, stats
         )
         if infer_skip is not None:
@@ -1409,6 +1524,16 @@ class PromptDefense:
         )
         out.raw_score = agg.max_main
         out.max_sentence = agg.max_main_sentence
+        out.non_finite = agg.non_finite
+        # Read in full: nothing cut off, and no chunk zeroed by the degeneracy guard.
+        for i, (start, end) in enumerate(string_ranges):
+            if start >= 0 and not truncated[i] and not any(j in degenerate for j in range(start, end)):
+                out.read_texts.add(strings[i])
+                out.chunks_by_text[strings[i]] = all_chunks[start:end]
+        field_max: dict[int, float] = {}
+        for i, s_max in zip((i for i, (st, _) in enumerate(string_ranges) if st >= 0), agg.per_string_scores, strict=True):
+            field_max[origin[i]] = max(field_max.get(origin[i], 0.0), s_max)
+        agg.field_scores = list(field_max.values())
         self._tier2_finalize(tier2, out, agg, multihead_cfg)
 
         # Collect the leaf values that scored high (per-string scores align with
@@ -1440,17 +1565,20 @@ class PromptDefense:
     def _tier2_build_chunks(
         tier2: Tier2Classifier,
         strings: list[str],
-    ) -> tuple[list[str], list[tuple[int, int]], set[str]]:
+    ) -> tuple[list[str], list[tuple[int, int]], set[str], list[bool]]:
         """Run ``prepare_chunks`` per string and flatten into one chunk list.
 
         ``string_ranges[i] = (start, end)`` is the half-open slice of
         ``all_chunks`` belonging to ``strings[i]``. A range of ``(-1, -1)``
         marks a string that the classifier skipped (too short, etc.).
+        ``truncated[i]`` is True when Tier 2 won't score all of ``strings[i]``.
         """
         all_chunks: list[str] = []
         string_ranges: list[tuple[int, int]] = []
         skip_reasons: set[str] = set()
+        truncated: list[bool] = []
         for prep in (tier2.prepare_chunks(s) for s in strings):
+            truncated.append(bool(prep.get("truncated", False)))
             if prep.get("skipped", True):
                 if prep.get("skip_reason"):
                     skip_reasons.add(str(prep["skip_reason"]))
@@ -1460,7 +1588,7 @@ class PromptDefense:
             start_idx = len(all_chunks)
             all_chunks.extend(chunks)
             string_ranges.append((start_idx, len(all_chunks)))
-        return all_chunks, string_ranges, skip_reasons
+        return all_chunks, string_ranges, skip_reasons, truncated
 
     @staticmethod
     def _tier2_run_inference(
@@ -1468,10 +1596,11 @@ class PromptDefense:
         all_chunks: list[str],
         multihead_cfg: MultiheadConfig | None,
         stats: BatchTokenStats,
-    ) -> tuple[list[float] | None, list[tuple[float, float | None]] | None, str | None, int]:
+    ) -> tuple[list[float] | None, list[tuple[float, float | None]] | None, str | None, int, set[int]]:
         """Run classifier inference with the multi-head misconfig guard.
 
-        Returns ``(all_scores, all_pairs, skip_reason, unique_chunk_count)``.
+        Returns ``(all_scores, all_pairs, skip_reason, unique_chunk_count, degenerate)``, where
+        ``degenerate`` holds the indices into ``all_chunks`` the degeneracy guard scored 0.
         ``skip_reason`` is non-``None`` either on inference failure or when
         ``multihead`` is configured but the model emits only single-head logits
         -- in that case ``all_pairs`` is forced to ``None`` so the caller falls
@@ -1494,6 +1623,10 @@ class PromptDefense:
             dedupe_index.append(u)
         unique_count = len(unique_chunks)
 
+        def degenerate() -> set[int]:
+            rows = set(stats.degenerate_rows)
+            return {j for j, u in enumerate(dedupe_index) if u in rows}
+
         try:
             if multihead_cfg is not None:
                 unique_pairs = tier2.classify_chunks_batch_pair(unique_chunks, stats)
@@ -1504,13 +1637,14 @@ class PromptDefense:
                         "multihead configured but model emits single-head logits"
                         " -- remove `multihead` config or use a dual-head model",
                         unique_count,
+                        set(),
                     )
                 all_pairs = [unique_pairs[u] for u in dedupe_index]
-                return [p[0] for p in all_pairs], all_pairs, None, unique_count
+                return [p[0] for p in all_pairs], all_pairs, None, unique_count, degenerate()
             unique_scores = tier2.classify_chunks_batch(unique_chunks, stats)
-            return [unique_scores[u] for u in dedupe_index], None, None, unique_count
+            return [unique_scores[u] for u in dedupe_index], None, None, unique_count, degenerate()
         except Exception as e:
-            return None, None, f"Inference error: {e}", unique_count
+            return None, None, f"Inference error: {e}", unique_count, set()
 
     @staticmethod
     def _coerce_safe_score(raw: Any) -> float:
@@ -1575,6 +1709,8 @@ class PromptDefense:
             for j in range(start_idx, end_idx):
                 chunk = all_chunks[j]
                 safe_score = cls._coerce_safe_score(all_scores[j])
+                if not (isinstance(all_scores[j], (float, int)) and math.isfinite(all_scores[j])):
+                    agg.non_finite = True
                 aux_raw = all_pairs[j][1] if all_pairs is not None else None
                 if safe_score > s_max:
                     s_max = safe_score
@@ -1643,12 +1779,12 @@ class PromptDefense:
         density_sub_threshold = (
             0.75 if t == 1.0 else 1.0 / (1.0 + math.exp(-math.log(3.0) / t))
         )
-        if len(agg.per_string_scores) > 2:
+        if len(agg.field_scores) > 2:
             high_count = sum(
-                1 for s in agg.per_string_scores if s >= density_sub_threshold
+                1 for s in agg.field_scores if s >= density_sub_threshold
             )
             if high_count > 0:
-                factor = (high_count / len(agg.per_string_scores)) ** 0.1
+                factor = (high_count / len(agg.field_scores)) ** 0.1
                 out.effective_score = agg.max_main * factor
         out.risk = tier2.get_risk_level(out.effective_score)
 

@@ -19,7 +19,7 @@ from typing import Any
 from ..sanitizers.normalizer import normalize_for_detection, normalize_unicode
 from ..types import MultiheadConfig, RiskLevel, Tier2Result
 from ..utils.boundary import strip_boundary_patterns
-from ..utils.text import utf16_len
+from ..utils.text import truncate, utf16_len
 from .onnx_classifier import BatchTokenStats, OnnxClassifier, get_default_model_path
 
 _logger = logging.getLogger(__name__)
@@ -401,7 +401,7 @@ class Tier2Classifier:
             return _skipped(start, "No classifiable sentences")
 
         try:
-            chunks = self._pack_sentences(sentences, max_content_tokens)
+            chunks, _ = self._pack_sentences(sentences, max_content_tokens)
             pairs = self._onnx.classify_batch_pair(chunks)
         except Exception as e:
             return _skipped(start, f"Classification error: {e}")
@@ -436,27 +436,34 @@ class Tier2Classifier:
             return {"chunks": [], "skipped": True, "skip_reason": "Text below minTextLength"}
 
         model_max_len = self._onnx.get_max_length()
-        bounded = text[: self._max_text_length] if len(text) > self._max_text_length else text
+        # Lengths are UTF-16 code units, as in the TS package.
+        truncated = utf16_len(text) > self._max_text_length
+        bounded = truncate(text, self._max_text_length) if truncated else text
         try:
             self._onnx.warmup()
         except Exception as e:
             return {"chunks": [], "skipped": True, "skip_reason": f"Warmup error: {e}"}
 
-        if len(bounded) + 2 <= model_max_len:
-            return {"chunks": [bounded], "skipped": False}
+        if utf16_len(bounded) + 2 <= model_max_len:
+            return {"chunks": [bounded], "skipped": False, "truncated": truncated}
 
         try:
             total_tokens = self._onnx.count_tokens(bounded)
         except Exception as e:
             return {"chunks": [], "skipped": True, "skip_reason": f"Token count error: {e}"}
         if total_tokens <= model_max_len:
-            return {"chunks": [bounded], "skipped": False}
+            return {"chunks": [bounded], "skipped": False, "truncated": truncated}
 
         max_content_tokens = model_max_len - 2
+        # Sentences under min_text_length are dropped. A Tier 1 match spread over them isn't in any
+        # chunk, so the gate counts it as unread.
         sentences = [s for s in _split_into_sentences(bounded) if utf16_len(s) >= self._min_text_length]
         if not sentences:
             return {"chunks": [], "skipped": True, "skip_reason": "No classifiable sentences"}
-        return {"chunks": self._pack_sentences(sentences, max_content_tokens), "skipped": False}
+        chunks, overlong = self._pack_sentences(sentences, max_content_tokens)
+        # truncated: Tier 2 won't score all of the text (cut at max_text_length, or a sentence
+        # longer than the model window).
+        return {"chunks": chunks, "skipped": False, "truncated": truncated or overlong}
 
     def classify_chunks_batch(self, chunks: list[str], stats: BatchTokenStats | None = None) -> list[float]:
         """Single-head batch classify. Returns main-head scores only."""
@@ -482,7 +489,10 @@ class Tier2Classifier:
     # Helpers / introspection
     # ------------------------------------------------------------------
 
-    def _pack_sentences(self, sentences: list[str], max_content_tokens: int) -> list[str]:
+    def _pack_sentences(self, sentences: list[str], max_content_tokens: int) -> tuple[list[str], bool]:
+        """Greedy packer. A sentence over ``max_content_tokens`` becomes its own chunk and is
+        truncated by the tokenizer; the second value reports that."""
+        overlong = False
         chunks: list[str] = []
         current: list[str] = []
         current_tokens = 0
@@ -492,6 +502,7 @@ class Tier2Classifier:
             sentence_content_tokens = max(0, sentence_tokens - 2)
 
             if sentence_content_tokens > max_content_tokens:
+                overlong = True
                 if current:
                     chunks.append(" ".join(current))
                     current = []
@@ -510,7 +521,7 @@ class Tier2Classifier:
         if current:
             chunks.append(" ".join(current))
 
-        return chunks
+        return chunks, overlong
 
     def is_injection(self, text: str, threshold: float | None = None) -> bool:
         result = self.classify(text)

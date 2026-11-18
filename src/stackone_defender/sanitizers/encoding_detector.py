@@ -112,8 +112,14 @@ def _b64decode_url_safe(candidate: str) -> str | None:
         return decoded_bytes.decode("latin-1", errors="replace")
 
 
+# Whitespace JavaScript's \s matches, so decodes are kept exactly as in the TS package.
+_JS_WHITESPACE = frozenset(
+    "\t\n\v\f\r \u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff" + "".join(chr(c) for c in range(0x2000, 0x200B))
+)
+
+
 def _is_printable_text(s: str | None) -> bool:
-    return s is not None and all(0x20 <= ord(c) <= 0x7E or c in "\t\n\r" for c in s)
+    return bool(s) and all(0x20 <= ord(c) <= 0x7E or c in _JS_WHITESPACE for c in s)
 
 
 # Retries per candidate when a word joined by - or _ makes the whole run undecodable.

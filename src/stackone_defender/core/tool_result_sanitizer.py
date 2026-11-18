@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from ..classifiers.pattern_detector import PatternDetector, create_pattern_detector
+from ..classifiers.pattern_detector import PatternDetector, create_pattern_detector, tier1_analysis_copy
 from ..config import (
     DANGEROUS_KEYS,
     DEFAULT_CUMULATIVE_RISK_THRESHOLDS,
@@ -25,6 +25,7 @@ from ..sanitizers.encoding_detector import decode_all_levels
 from ..types import (
     CumulativeRiskTracker,
     DataBoundary,
+    PatternMatch,
     RiskLevel,
     RiskyFieldConfig,
     SanitizationContext,
@@ -42,6 +43,7 @@ from ..utils.structure import (
     should_continue_traversal,
     update_size_metrics,
 )
+from ..utils.text import phrase_key
 
 # Risk levels in ascending order, for monotonic max comparison.
 RISK_ORDER: list[RiskLevel] = ["low", "medium", "high", "critical"]
@@ -334,6 +336,8 @@ class ToolResultSanitizer:
             result = self._pattern_detector.analyze(analysis_value)
             if result.has_detections:
                 tier1_patterns = list(dict.fromkeys(m.pattern for m in result.matches))
+                if tier1_patterns:
+                    self._record_tier1_match(metadata, analysis_value, result.matches)
                 risk_level = _risk_ladder(risk_level, result.suggested_risk)
                 if context.cumulative_risk and result.matches:
                     self._update_cumulative_risk(context.cumulative_risk, result.suggested_risk, tier1_patterns)
@@ -349,6 +353,7 @@ class ToolResultSanitizer:
                     enc_patterns = [m.pattern for m in enc.matches]
                     tier1_patterns = list(dict.fromkeys(tier1_patterns + enc_patterns))
                     escalated_from_encoding = True
+                    self._record_tier1_match(metadata, decoded, enc.matches)
                     risk_level = _risk_ladder(risk_level, enc.suggested_risk)
                     if context.cumulative_risk:
                         self._update_cumulative_risk(context.cumulative_risk, enc.suggested_risk, enc_patterns)
@@ -369,6 +374,26 @@ class ToolResultSanitizer:
 
         return self._maybe_wrap(value, context)
 
+    @staticmethod
+    def _record_tier1_match(metadata: SanitizationMetadata, text: str, matches: list[PatternMatch]) -> None:
+        """Record what Tier 1 matched, for the Tier 2 gate. A phrase matched only on Tier 1's
+        normalised copy (leet, split or joined words) isn't in the raw text, so Tier 2 also gets
+        that copy."""
+        metadata.tier1_match_texts.append(text)
+        raw = phrase_key(text)
+        missing: list[str] = []
+        for phrase in dict.fromkeys(m.matched for m in matches):
+            metadata.tier1_match_phrases.append((text, phrase))
+            k = phrase_key(phrase)
+            if k and k not in raw:
+                missing.append(k)
+        if not missing:
+            return
+        for copy in dict.fromkeys(tier1_analysis_copy(text, alternate) for alternate in (False, True)):
+            key = phrase_key(copy)
+            if copy != text and any(k in key for k in missing):
+                metadata.tier1_normalised_copies.append((text, copy))
+
     def _detect_in_key(self, key: str, key_path: str, context: SanitizationContext, metadata: SanitizationMetadata) -> None:
         """Detect injection hidden in an object key. Keys are never rewritten."""
         if not self._use_tier1 or len(key) < 3:
@@ -381,6 +406,7 @@ class ToolResultSanitizer:
         if not result.has_detections or not result.matches:
             return
         patterns = [m.pattern for m in result.matches]
+        metadata.tier1_match_texts.append(analysis_key)
         path = f"{key_path} (key)"
         metadata.fields_sanitized.append(path)
         metadata.methods_by_field[path] = ["pattern_removal"]

@@ -925,3 +925,82 @@ class TestTier2ScoresNormalisedText:
             {"notes": text}, "crm_get_record"
         )
         assert r.allowed is False
+
+
+@patch("stackone_defender.core.prompt_defense.create_tier2_classifier")
+class TestTier1GatedOnTier2:
+    """ENG-4207 without the model: a fake Tier 2 sets the score, truncation and degenerate rows."""
+
+    TEXT = "The borrower has unrestricted access to the accounts."
+
+    @staticmethod
+    def _tier2(score: float, *, truncated: bool = False, degenerate: bool = False, split: bool = False):
+        t2 = MagicMock()
+        t2.get_risk_level.return_value = "low"
+        t2.get_multihead_config.return_value = None
+        t2.get_temperature.return_value = 1.0
+
+        def prepare(s):
+            # split: the matched phrase straddles two chunks.
+            cut = s.find("restricted") if split else -1
+            chunks = [s[:cut], s[cut:]] if cut > 0 else [s]
+            return {"chunks": chunks, "skipped": False, "truncated": truncated}
+
+        t2.prepare_chunks.side_effect = prepare
+
+        def classify(chunks, stats=None):
+            if degenerate and stats is not None:
+                stats.degenerate_rows.extend(range(len(chunks)))
+            return [score] * len(chunks)
+
+        t2.classify_chunks_batch.side_effect = classify
+        return t2
+
+    def _run(self, mock_create, t2, sync: bool, payload: dict | None = None):
+        mock_create.return_value = t2
+        defense = create_prompt_defense(enable_tier2=True, block_high_risk=True)
+        payload = payload or {"description": self.TEXT}
+        if sync:
+            return defense.defend_tool_result(payload, "generic_get_record")
+        return asyncio.run(defense.defend_tool_result_async(payload, "generic_get_record"))
+
+    @pytest.mark.parametrize("sync", [True, False])
+    def test_low_tier2_score_gates_tier1(self, mock_create, sync):
+        r = self._run(mock_create, self._tier2(0.1), sync)
+        assert r.detections and r.tier1_gated is True and r.allowed
+        assert r.risk_level in ("low", "medium")
+
+    @pytest.mark.parametrize("sync", [True, False])
+    def test_tier2_agreeing_keeps_tier1(self, mock_create, sync):
+        r = self._run(mock_create, self._tier2(0.4), sync)
+        assert r.tier1_gated is None and not r.allowed
+
+    @pytest.mark.parametrize(
+        "t2",
+        [
+            {"score": float("nan")},
+            {"score": 0.1, "truncated": True},
+            {"score": 0.1, "degenerate": True},
+            {"score": 0.1, "split": True},
+        ],
+        ids=["non-finite", "truncated", "degenerate", "phrase-split"],
+    )
+    def test_text_tier2_did_not_really_score_keeps_tier1(self, mock_create, t2):
+        r = self._run(mock_create, self._tier2(**t2), sync=True)
+        assert r.tier1_gated is None and not r.allowed
+
+    def test_phrase_in_another_fields_chunk_does_not_count(self, mock_create):
+        t2 = self._tier2(0.1)
+        t2.prepare_chunks.side_effect = lambda s: {
+            "chunks": [s[: s.find("restricted")], s[s.find("restricted") :]] if s.startswith("The borrower") else [s],
+            "skipped": False,
+        }
+        payload = {"description": self.TEXT, "notes": "Note that unrestricted access needs approval."}
+        r = self._run(mock_create, t2, sync=True, payload=payload)
+        assert r.tier1_gated is None and not r.allowed
+
+    def test_every_occurrence_needs_a_chunk(self, mock_create):
+        t2 = self._tier2(0.1)
+        t2.prepare_chunks.side_effect = lambda s: {"chunks": [self.TEXT], "skipped": False}
+        r = self._run(mock_create, t2, sync=True, payload={"description": f"{self.TEXT} {self.TEXT}"})
+        assert r.tier1_gated is None and not r.allowed
