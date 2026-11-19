@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Feature branches are tested by their pull_request run; a push run on the
+  # same commit would only repeat it.
   push:
+    branches: [main]
   pull_request:
     branches: [main]
 
